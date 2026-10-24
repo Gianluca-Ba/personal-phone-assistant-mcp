@@ -101,3 +101,7 @@ Aggiornare la lista strumenti della connessione MCP esistente. Endpoint invariat
 Le consultazioni restano disponibili con OAuth. Per vedere le autorizzazioni dei tool outbound può essere necessaria una riautorizzazione con gli scope aggiuntivi; questa non abilita l’esecuzione reale. Non selezionare approvazioni permanenti come sostituto del consenso per una specifica telefonata.
 
 La revoca standard è pubblicata nella discovery. KV è eventualmente consistente: per invalidare tutti i vecchi grant aggiornare `OWNER_TOKEN_VERSION` in entrambi i Worker con un rilascio coordinato; non fare questa operazione nel rilascio MCP corrente. L’ultimo collaudo pubblico di lettura è documentato in [deployment](docs/deployment.md); il nuovo limite di consenso e i test sono in [sicurezza outbound](docs/outbound-confirmation.md).
+
+## Autorizzazione incrementale OAuth
+
+I tool outbound richiedono ora un challenge HTTP `403 insufficient_scope`, completo di `WWW-Authenticate` e `_meta["mcp/www_authenticate"]`, invece di un normale errore “Missing authorization”. `tools/list` dichiara gli scope OAuth per ciascun tool. [Procedura precisa per aggiornare l’autorizzazione ChatGPT](docs/oauth-step-up.md). Lo scope aggiuntivo non abilita l’esecuzione reale.

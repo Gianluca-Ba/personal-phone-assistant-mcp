@@ -1,0 +1,18 @@
+{
+  "verified_at": "2026-10-24T23:30:37.597Z",
+  "mcp_version": "0a1a7bcf-6a9a-4169-b1e0-652856c7c8f8",
+  "tests_passed": 14,
+  "real_phone_calls_performed": false,
+  "checks": {
+    "personal-phone-assistant-auth_unchanged": true,
+    "personal-phone-assistant_unchanged": true,
+    "outbound_disabled": true,
+    "production_auth_scope_catalog": true,
+    "verified_native_consent_code_unchanged": true
+  },
+  "connected_chatgpt_response": {
+    "action": "TRIGGER_REAUTHENTICATION",
+    "reason": "www_authenticate_reauth",
+    "requested_scopes": ["calls:read", "calls:write"]
+  }
+}

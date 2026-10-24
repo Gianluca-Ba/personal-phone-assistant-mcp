@@ -1,8 +1,10 @@
+let authorizationSequence = 0;
 // OAuth client simulation for local tests; never sends a real phone request.
 export async function login(
   auth: { fetch: Function },
   scope: string,
   secret: string,
+  existingClientId?: string,
 ) {
   const issuer =
     "https://personal-phone-assistant-auth.barsaglini-gianluca.workers.dev";
@@ -12,16 +14,18 @@ export async function login(
   const meta = await (
     await auth.fetch(issuer + "/.well-known/oauth-authorization-server")
   ).json();
-  const client = await (
-    await auth.fetch(meta.registration_endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        redirect_uris: [redirect],
-        token_endpoint_auth_method: "none",
-      }),
-    })
-  ).json();
+  const client = existingClientId
+    ? { client_id: existingClientId }
+    : await (
+        await auth.fetch(meta.registration_endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            redirect_uris: [redirect],
+            token_endpoint_auth_method: "none",
+          }),
+        })
+      ).json();
   const verifier = "b".repeat(64),
     digest = await crypto.subtle.digest(
       "SHA-256",
@@ -49,7 +53,7 @@ export async function login(
     method: "POST",
     redirect: "manual",
     headers: {
-      "CF-Connecting-IP": `192.0.2.${Math.floor(Math.random() * 200) + 1}`,
+      "CF-Connecting-IP": `192.0.2.${++authorizationSequence}`,
       Origin: issuer,
       Cookie: consent.headers.get("set-cookie")!.split(";")[0],
       "Content-Type": "application/x-www-form-urlencoded",

@@ -325,9 +325,11 @@ it("MCP scope checks and schema reject model-supplied confirmations and legacy w
     });
     return r.json() as Promise<any>;
   };
-  expect((await call("create_outbound_request", input())).result.isError).toBe(
-    true,
-  );
+  expect(
+    (await call("create_outbound_request", input())).result._meta[
+      "mcp/www_authenticate"
+    ][0],
+  ).toContain('error="insufficient_scope"');
   const s = await create();
   expect(
     (await call("approve_outbound_request", approve(s))).result.isError,
@@ -405,4 +407,165 @@ it("valid execute OAuth plus fabricated native approval metadata cannot unlock p
     "WEB_APPROVAL_REMOVED",
     "WEB_APPROVAL_REMOVED",
   ]);
+});
+
+it("steps up the same OAuth client from read to write and execute using complete HTTP challenges", async () => {
+  const resource =
+    "https://personal-phone-assistant-mcp.barsaglini-gianluca.workers.dev/mcp";
+  const issuer =
+    "https://personal-phone-assistant-auth.barsaglini-gianluca.workers.dev";
+  const discovery = (await (
+    await auth.fetch(issuer + "/.well-known/oauth-authorization-server")
+  ).json()) as any;
+  expect(discovery.scopes_supported).toEqual(
+    expect.arrayContaining([
+      "calls:read",
+      "calls:write",
+      "calls:execute",
+      "offline_access",
+    ]),
+  );
+  const read = await login(auth, "calls:read offline_access", secret);
+  const before = await stats();
+  const invoke = (token: string, name: string, args: unknown) =>
+    real.fetch(resource, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 17,
+        method: "tools/call",
+        params: { name, arguments: args },
+      }),
+    });
+  const details = input();
+  const denied = await invoke(
+    read.access_token,
+    "create_outbound_request",
+    details,
+  );
+  expect(denied.status).toBe(403);
+  const challenge = denied.headers.get("WWW-Authenticate")!;
+  expect(challenge).toContain('error="insufficient_scope"');
+  expect(challenge).toContain('scope="calls:read calls:write"');
+  const metadataURL = /resource_metadata="([^"]+)"/.exec(challenge)![1];
+  const metadata = (await (await real.fetch(metadataURL)).json()) as any;
+  expect(metadata.resource).toBe(resource);
+  expect(metadata.authorization_servers).toEqual([issuer]);
+  expect(
+    ((await denied.json()) as any).result._meta["mcp/www_authenticate"],
+  ).toEqual([challenge]);
+  expect((await stats()).create ?? 0).toBe(before.create ?? 0);
+  const widenedRefresh = await auth.fetch(discovery.token_endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: read.refresh_token,
+      client_id: read.clientId,
+      resource,
+      scope: "calls:read calls:write offline_access",
+    }),
+  });
+  expect(widenedRefresh.status).toBe(200);
+  const refreshedRead = (await widenedRefresh.json()) as any;
+  expect(refreshedRead.scope.split(" ")).not.toContain("calls:write");
+  expect(
+    (
+      await invoke(
+        refreshedRead.access_token,
+        "create_outbound_request",
+        details,
+      )
+    ).status,
+  ).toBe(403);
+  const write = await login(
+    auth,
+    "calls:read calls:write offline_access",
+    secret,
+    read.clientId,
+  );
+  expect(write.clientId).toBe(read.clientId);
+  expect(write.scope.split(" ")).toContain("calls:write");
+  const allowed = await invoke(
+    write.access_token,
+    "create_outbound_request",
+    details,
+  );
+  expect(allowed.status).toBe(200);
+  const created = (await allowed.json()) as any;
+  expect(created.result.isError).not.toBe(true);
+  const s = JSON.parse(created.result.content[0].text).request as Snapshot;
+  expect(s.state).toBe("pending_approval");
+  expect((await stats()).create - (before.create ?? 0)).toBe(1);
+  // The original read token is not silently upgraded by the new consent.
+  expect([401, 403]).toContain(
+    (await invoke(read.access_token, "create_outbound_request", details))
+      .status,
+  );
+  const deniedApproval = await invoke(
+    write.access_token,
+    "approve_outbound_request",
+    approve(s),
+  );
+  expect(deniedApproval.status).toBe(403);
+  expect(deniedApproval.headers.get("WWW-Authenticate")).toContain(
+    'scope="calls:read calls:execute"',
+  );
+  const execute = await login(
+    auth,
+    "calls:read calls:execute offline_access",
+    secret,
+    read.clientId,
+  );
+  expect(execute.scope.split(" ")).toContain("calls:execute");
+  const reachedGuard = await invoke(
+    execute.access_token,
+    "approve_outbound_request",
+    approve(s),
+  );
+  expect(reachedGuard.status).toBe(200);
+  const blocked = (await reachedGuard.json()) as any;
+  expect(blocked.result.isError).toBe(true);
+  expect(blocked.result.content[0].text).toContain(
+    "TRUSTED_CONFIRMATION_UNAVAILABLE",
+  );
+  expect((await stats()).approve ?? 0).toBe(before.approve ?? 0);
+  const descriptors = await real.fetch(resource, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${execute.access_token}`,
+      "Content-Type": "application/json",
+      Accept: "application/json, text/event-stream",
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 18, method: "tools/list" }),
+  });
+  const tools = ((await descriptors.json()) as any).result.tools;
+  expect(
+    tools.find((t: any) => t.name === "create_outbound_request")
+      .securitySchemes,
+  ).toEqual([{ type: "oauth2", scopes: ["calls:read", "calls:write"] }]);
+  expect(
+    tools.find((t: any) => t.name === "create_outbound_request")._meta
+      .securitySchemes,
+  ).toEqual([{ type: "oauth2", scopes: ["calls:read", "calls:write"] }]);
+  expect(
+    tools.find((t: any) => t.name === "approve_outbound_request")._meta
+      .securitySchemes,
+  ).toEqual([{ type: "oauth2", scopes: ["calls:read", "calls:execute"] }]);
+  // Baseline is included even if the token has the operation scope alone.
+  const writeOnly = await login(auth, "calls:write", secret);
+  const needRead = await invoke(
+    writeOnly.access_token,
+    "create_outbound_request",
+    details,
+  );
+  expect(needRead.status).toBe(403);
+  expect(needRead.headers.get("WWW-Authenticate")).toContain(
+    'scope="calls:read calls:write"',
+  );
 });
