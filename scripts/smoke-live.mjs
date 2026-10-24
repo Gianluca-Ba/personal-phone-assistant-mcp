@@ -180,13 +180,23 @@ const check = async () => {
     const tools = (await rpc("tools/list")).tools;
     const names = tools.map((t) => t.name).sort();
     assert.deepEqual(names, [
+      "approve_outbound_request",
+      "create_outbound_request",
       "get_call_details",
       "get_outbound_status",
       "list_calls",
       "search_calls",
     ]);
-    assert.ok(tools.every((t) => t.annotations?.readOnlyHint === true));
-    report.checks.only_four_read_only_tools = true;
+    assert.equal(
+      tools.filter((t) => t.annotations?.readOnlyHint === true).length,
+      4,
+    );
+    const approveTool = tools.find(
+      (t) => t.name === "approve_outbound_request",
+    );
+    assert.equal(approveTool.annotations.destructiveHint, true);
+    assert.equal(approveTool.annotations.readOnlyHint, false);
+    report.checks.four_read_only_tools_and_two_guarded_outbound_tools = true;
     const call = async (name, args) => {
       const result = await rpc("tools/call", { name, arguments: args });
       assert.ok(!result.isError, `Read tool failed: ${name}`);

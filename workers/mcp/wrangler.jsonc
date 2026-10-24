@@ -27,6 +27,7 @@
     "OUTBOUND_CONTRACT_VERIFIED": "false",
     "OUTBOUND_ALLOWED_DESTINATIONS": "[]",
     "SCHEMA_MAPPING": "{\"calls\":{\"id\":\"id\",\"phone\":\"caller_number\",\"destination\":\"destination_number\",\"time\":\"created_at\",\"time_format\":\"iso\"},\"call_summaries\":{\"call\":\"call_id\",\"summary\":\"summary_it\",\"actions\":\"action_required\"},\"outbound_requests\":{\"phone\":\"destination_number\",\"time\":\"created_at\",\"time_format\":\"iso\"}}",
+    "OUTBOUND_RATE_LIMIT_PER_HOUR": "5",
   },
   "durable_objects": {
     "bindings": [

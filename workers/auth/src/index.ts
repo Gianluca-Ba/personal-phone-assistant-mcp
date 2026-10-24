@@ -1,9 +1,4 @@
 import {
-  confirmation,
-  sessionCookie,
-  type ConfirmationEnv,
-} from "./confirmation";
-import {
   AuthorizationError,
   OAuthAuthorizationServer,
   type AuthRequest,
@@ -13,7 +8,7 @@ const ISSUER =
   "https://personal-phone-assistant-auth.barsaglini-gianluca.workers.dev";
 const RESOURCE =
   "https://personal-phone-assistant-mcp.barsaglini-gianluca.workers.dev/mcp";
-interface Env extends ConfirmationEnv {
+interface Env {
   OAUTH_KV: KVNamespace;
   OWNER_LOGIN_SECRET: string;
   OWNER_TOKEN_VERSION: string;
@@ -134,14 +129,13 @@ async function authorize(request: Request, env: Env) {
   const headers = new Headers(approved.headers);
   headers.set("Location", result.redirectTo);
   headers.set("Cache-Control", "no-store");
-  headers.append("Set-Cookie", await sessionCookie(env));
   return new Response(null, { status: 302, headers });
 }
 export class AuthServer extends WorkerEntrypoint<Env> {
   async fetch(request: Request) {
     try {
       if (new URL(request.url).pathname === "/confirm")
-        return await confirmation(request, this.env);
+        return new Response("Web approval removed", { status: 410 });
       return new URL(request.url).pathname === "/authorize"
         ? await authorize(request, this.env)
         : await provider.fetch(request, this.env, this.ctx);

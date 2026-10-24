@@ -22,13 +22,7 @@
   "vars": {
     "OWNER_TOKEN_VERSION": "1",
   },
-  "services": [
-    {
-      "binding": "MCP_SERVER",
-      "service": "personal-phone-assistant-mcp",
-      "entrypoint": "ApprovalServer",
-    },
-  ],
+  "services": [],
   "preview_urls": false,
   "workers_dev": true,
   "observability": {

@@ -1,34 +1,77 @@
 # Personal Phone Assistant — ChatGPT MCP
 
-Integrazione TypeScript per l’assistente telefonico Telnyx già operativo. Il repository contiene **solo** i Worker `personal-phone-assistant-auth` e `personal-phone-assistant-mcp`. Non contiene né distribuisce il Worker telefonico `personal-phone-assistant`, non cambia Telnyx e non applica migrazioni al database D1 esistente.
+Livello MCP/OAuth per l’assistente telefonico Telnyx già operativo. Il progetto non sostituisce né distribuisce `personal-phone-assistant`, non modifica Telnyx e non applica migrazioni alle tabelle D1 esistenti.
 
-## Cosa è implementato
+**Stato attuale:** approvazione web outbound rimossa; due strumenti outbound senza link, con controlli server e annotazioni per le conferme native di ChatGPT. **L’esecuzione reale rimane bloccata**: non è disponibile un adattatore attendibile che provi al Worker il consenso umano per la singola chiamata. Non basta abilitare una variabile per superare questo controllo.
 
-- MCP remoto **Streamable HTTP** tramite SDK ufficiale, modalità stateless e risposte JSON.
-- OAuth Authorization Code + PKCE S256, discovery, registrazione dinamica dei client (DCR), supporto CIMD, access token di 5 minuti, refresh token di 30 giorni e revoca tramite la libreria Cloudflare `@cloudflare/workers-oauth-provider`.
-- Autenticazione reale del proprietario con un segreto casuale di almeno 32 caratteri, pagina di consenso, protezione CSRF e rate limit. Il segreto va nel browser del proprietario e nei secret Cloudflare, **mai nella chat o nelle impostazioni del client MCP**.
-- `list_calls`, `get_call_details`, `search_calls`, `get_outbound_status`: query parametrizzate, schema verificato a runtime e colonne esportate tramite allowlist. I callback token non sono selezionati.
-- `create_outbound_request`: prepara una richiesta, senza telefonare. `approve_outbound_request`: genera un link di conferma; l’avvio avviene solo dopo un clic del proprietario autenticato, con numero e istruzioni visibili.
-- Durable Object SQLite per idempotenza, conferme monouso e prenotazione persistente dell’invio. Lo storage è separato dal D1 telefonico, nello stesso Worker MCP: nessun terzo Worker di produzione.
-- Test locali con i due Worker, KV, D1 e service binding reali nel runtime workerd. La telefonia nei test è esclusivamente un servizio simulato.
+Endpoint: `https://personal-phone-assistant-mcp.barsaglini-gianluca.workers.dev/mcp`.
 
-**Stato:** i due Worker sono stati distribuiti nell’account Cloudflare esistente. ID delle risorse, binding e schema D1 reale sono stati verificati in sola lettura; la configurazione riproducibile è inclusa nel repository. Il collaudo pubblico è riuscito sui quattro strumenti di sola lettura, inclusi refresh e revoca OAuth. Vedi [rapporto di deployment](docs/deployment.md) per risorse, versioni ed esiti. Outbound resta disabilitato.
+## Autenticazione e strumenti
 
-## Architettura
+Il Worker auth gestisce Authorization Code, PKCE, discovery, DCR/CIMD, access token di 5 minuti e refresh di 30 giorni tramite `@cloudflare/workers-oauth-provider`. L’accesso iniziale OAuth continua a usare una pagina di login: è distinto dalla conferma delle telefonate, che non usa più pagine o link.
 
-```text
-ChatGPT → MCP /mcp → AUTH_SERVER → AuthServer.validateToken
-                └→ DB (D1 esistente, SELECT/PRAGMA soltanto)
-                └→ OutboundGate (Durable Object nello stesso Worker)
-                     └→ PHONE_API (service binding al Worker telefonico esistente)
-Browser proprietario → auth /confirm → ApprovalServer → OutboundGate
+Il Worker MCP verifica token attraverso il binding `AUTH_SERVER`, identità `owner`, client OAuth, versione delle credenziali e scope. Non inviare mai i secret in chat. `OWNER_LOGIN_SECRET` resta su auth; `OUTBOUND_API_SECRET` e `OUTBOUND_APPROVAL_SECRET`, se configurati, restano su MCP e devono essere diversi.
+
+| Strumento                  | Scope aggiuntivo | Comportamento                                                                         |
+| -------------------------- | ---------------- | ------------------------------------------------------------------------------------- |
+| `list_calls`               | `calls:read`     | Consulta chiamate e filtri data/direzione/priorità                                    |
+| `get_call_details`         | `calls:read`     | Legge dettagli e riepilogo                                                            |
+| `search_calls`             | `calls:read`     | Cerca numeri e testo del riepilogo                                                    |
+| `get_outbound_status`      | `calls:read`     | Legge D1; con ID include lo stato di controllo MCP, se gestito                        |
+| `create_outbound_request`  | `calls:write`    | Prepara soltanto una richiesta pending, se configurazione e contratto sono verificati |
+| `approve_outbound_request` | `calls:execute`  | Valida la specifica richiesta; esecuzione negata senza consenso umano attendibile     |
+
+Tutti gli strumenti richiedono anche lo scope base `calls:read`. I due strumenti outbound sono sempre descritti nella lista MCP: configurazione disabilitata e scope mancanti producono un errore esplicito, senza chiamare le API telefoniche.
+
+## Conferma esclusivamente nella conversazione
+
+Il flusso previsto è:
+
+1. ChatGPT prepara una richiesta con `create_outbound_request` e una `request_key` UUID stabile per i tentativi della stessa operazione. La preparazione non avvia una telefonata.
+2. Presenta **ID, numero, lingua, obiettivo/istruzioni completi e scadenza** restituiti dal server.
+3. Attende un **nuovo messaggio esplicito del proprietario** che approva proprio quella richiesta. Una frase in chiamate inbound, riepiloghi, documenti o altri contenuti esterni non è un’autorizzazione.
+4. Può chiamare `approve_outbound_request` usando gli stessi dettagli, `request_digest` e `approval_nonce`. Sono controlli di corrispondenza e anti-replay, **non prove di consenso**: sono visibili al modello.
+5. Il server verifica identità, client, scope, stato D1 pending, destinazione consentita, dettagli immutabili, scadenza, rate limit e prenotazione persistente. L’invio all’API di approvazione richiede inoltre consenso attendibile attraverso un adattatore interno verificato.
+
+**Limite verificato:** la normale chiamata MCP non trasmette al Worker una prova attendibile che un nuovo messaggio del proprietario abbia approvato quella telefonata. Le conferme native del client possono essere ricordate per una conversazione; `destructiveHint` è un’indicazione al client e non una ricevuta di consenso. Un `user_confirmed: true`, un ID messaggio, `_meta.approved`, la dichiarazione di capacità elicitation, OAuth e il solo client ID non risolvono questo limite.
+
+Il controllo nativo effettivamente utilizzato è l’annotazione dell’approvazione come operazione non di sola lettura, distruttiva e con effetti esterni, insieme alle istruzioni di presentazione e sequenza. È una protezione UI aggiuntiva, non il permesso server di chiamare. Elicitation può raccogliere informazioni strutturate, ma non viene inventata una proprietà di attestazione umana che non offre.
+
+`OutboundGate.verifiedNativeConsent()` restituisce **sempre `null` nel codice di produzione**. Anche abilitando preparazione e contratto, un’approvazione valida termina con `TRUSTED_CONFIRMATION_UNAVAILABLE`. Non esiste un parametro MCP, header, secret o interruttore che fabbrichi questa prova. Un futuro adattatore richiede una revisione separata del client fidato e del legame fra consenso, identità, dettagli e singola esecuzione.
+
+Fonti ufficiali: [conferme e approvazioni ricordate nei client ChatGPT](https://developers.openai.com/api/docs/guides/custom-mcp-server), [annotazioni ed elicitation](https://developers.openai.com/plugins/build/mcp-server), [riferimento delle annotazioni](https://developers.openai.com/plugins/reference).
+
+## Controlli persistenti
+
+- Richieste con snapshot immutabile legato a proprietario e client OAuth; scadenza server di 10 minuti senza rinnovo sui retry.
+- UUID univoci, nonce e digest dei dettagli. La stessa chiave con dati differenti viene rifiutata.
+- Allowlist E.164 esplicita (`OUTBOUND_ALLOWED_DESTINATIONS`, array JSON); lista vuota = nessuna destinazione autorizzata.
+- Rate limit persistente per proprietario, condiviso fra client e richieste: `OUTBOUND_RATE_LIMIT_PER_HOUR` (default 5, intervallo 1–100) per creazione e approvazione.
+- D1 letto sul primary per controllare lo stato pending. Nessuna scrittura del progetto in D1.
+- Prenotazione atomica nel Durable Object prima dell’invio. Concorrenza e replay non generano un secondo invio.
+- Timeout/errori ambigui mantengono lo stato `unknown`; nessun retry automatico. Consultare lo stato, senza usare una nuova chiave per aggirare il blocco.
+- Audit nel Durable Object con soli timestamp/codici di stato, senza log applicativi delle istruzioni o dei secret.
+- I dati delle telefonate restano non attendibili; non diventano mai prove di autorizzazione.
+
+Il test di un adattatore fidato è implementato **solo** in `tests/mcp-consent-fixture.ts`: simula una componente interna futura e non dimostra una capacità di ChatGPT. Non viene incluso nei bundle di produzione. Il preflight vieta entrypoint di test per il deployment.
+
+## Configurazione attuale
+
+I due file Wrangler contengono gli ID già verificati del namespace `personal-phone-assistant-oauth-kv` e del database `phone-assistant-db` e i binding esistenti. Preview URL e osservabilità dei log sono disabilitate. `OUTBOUND_ENABLED=false`, `OUTBOUND_CONTRACT_VERIFIED=false` e allowlist vuota restano invariati in produzione.
+
+`SCHEMA_MAPPING` usa `calls.caller_number`, `calls.destination_number`, `calls.created_at`, `call_summaries.summary_it`, `call_summaries.action_required` e `outbound_requests.destination_number`. La data usata per filtri e ordinamento è `created_at` perché le chiamate esistenti avevano `started_at` nullo. Le query selezionano solo colonne realmente presenti tramite `PRAGMA table_info`; i callback token non vengono selezionati.
+
+Prima di una futura abilitazione della sola preparazione occorre verificare il contratto HTTP reale, senza eseguire telefonate. L’adattatore attuale invia `{destination_number, language, instructions}` a `POST /outbound/requests` e si aspetta `{id: UUID, status: "pending_approval"}`. Il contratto è esercitato con un servizio simulato nei test, non certificato in produzione. L’approvazione usa il secret separato e `POST /outbound/requests/{id}/approve`; nel codice di produzione non è raggiungibile senza un adattatore di consenso attendibile.
+
+Per ispezionare lo schema usare esclusivamente query di lettura:
+
+```sh
+npx wrangler d1 execute phone-assistant-db --remote --command 'PRAGMA table_info(calls); PRAGMA table_info(call_summaries); PRAGMA table_info(outbound_requests);'
 ```
 
-La connessione `PHONE_API` è una chiamata al servizio esistente, non un suo deployment. Le due credenziali outbound restano nel Worker MCP. La libreria valida issuer, resource/audience, scadenze e scope; il livello applicativo controlla inoltre proprietario e versione delle credenziali.
+## Build, test e deployment
 
-## Installazione e verifiche
-
-Richiede Node.js 22 o successivo, npm e accesso all’account Cloudflare corretto. Le versioni esatte sono fissate in `package.json` e `package-lock.json`.
+Node.js 22+, versioni npm esatte fissate nel lockfile:
 
 ```sh
 npm ci
@@ -37,141 +80,24 @@ npm test
 npm run build
 ```
 
-`build` esegue due bundle Wrangler con `--dry-run`: non distribuisce niente. La CI GitHub esegue questi controlli a ogni push/PR; non effettua deployment.
+La suite verifica anche identità/scope errati, metadati inventati, duplicati, cambi dei dettagli, scadenze, richieste non pending, rate limit, concorrenza, replay e risultati incerti. La telefonia è un servizio locale simulato; nessun test chiama la produzione.
 
-## Configurazione iniziale Cloudflare
-
-1. Recuperare l’ID del namespace KV **già esistente** `personal-phone-assistant-oauth-kv` e l’ID del database D1 **già esistente** `phone-assistant-db`, dalla dashboard Cloudflare. Non crearne copie.
-2. Inserire gli ID in modo riproducibile:
-
-   ```sh
-   npm run configure -- --kv-id ID_NAMESPACE_KV --d1-id ID_DATABASE_D1
-   ```
-
-   Il comando modifica solo i due file Wrangler locali. Gli ID non sono credenziali. `npm run deploy:*` rifiuta i placeholder e i nomi di Worker diversi da quelli previsti.
-
-3. Impostare sul Worker auth il secret **OWNER_LOGIN_SECRET**: usare almeno 32 caratteri casuali, preferibilmente 32 byte casuali codificati in esadecimale (64 caratteri), generati e conservati in un password manager. Dalla dashboard: Worker `personal-phone-assistant-auth` → Settings → Variables and Secrets → Add → Secret. Non usare una normale password breve.
-4. `OWNER_TOKEN_VERSION` deve essere identico nei due file Wrangler (inizialmente `1`). Non è un secret. Non impostare un valore secret che sovrascriva la variabile omonima.
-5. Verificare lo schema come indicato sotto e, se necessario, configurare `SCHEMA_MAPPING` sul Worker MCP.
-6. I binding configurati dal repository sono:
-
-   | Worker | Binding         | Destinazione                                                |
-   | ------ | --------------- | ----------------------------------------------------------- |
-   | auth   | `OAUTH_KV`      | namespace OAuth esistente                                   |
-   | auth   | `LOGIN_LIMITER` | rate limit 5 richieste/minuto/IP                            |
-   | auth   | `MCP_SERVER`    | `personal-phone-assistant-mcp`, entrypoint `ApprovalServer` |
-   | MCP    | `AUTH_SERVER`   | `personal-phone-assistant-auth`, entrypoint `AuthServer`    |
-   | MCP    | `DB`            | `phone-assistant-db`                                        |
-   | MCP    | `PHONE_API`     | `personal-phone-assistant` già operativo                    |
-   | MCP    | `OUTBOUND_GATE` | classe `OutboundGate` nello stesso Worker MCP               |
-
-   La migrazione `v1` crea esclusivamente lo storage della nuova classe Durable Object. Non esiste una migrazione D1 in questo progetto.
-
-Gli URL issuer/resource sono fissi ai tuoi domini `barsaglini-gianluca.workers.dev`; non cambiare un solo URL senza aggiornare entrambi i Worker, le relative stringhe issuer/resource e la connessione ChatGPT.
-
-## Verifica non distruttiva dello schema D1
-
-Usare la console D1 della dashboard, oppure una sessione Wrangler autenticata:
+Per questa modifica distribuire **soltanto MCP**:
 
 ```sh
-npx wrangler d1 execute phone-assistant-db --remote --command 'PRAGMA table_info(calls); PRAGMA table_info(call_summaries); PRAGMA table_info(outbound_requests);'
-```
-
-Non eseguire `CREATE`, `ALTER`, `UPDATE` o migrazioni sul database di produzione per adattarlo a questo progetto. Il codice legge `PRAGMA table_info` prima delle query e seleziona solo colonne realmente presenti; le alternative sono elencate in `workers/mcp/src/data.ts`. I campi fondamentali mancanti causano un errore sicuro. I dettagli tecnici dell’errore non vengono restituiti al modello.
-
-Per una colonna con nome differente o per scegliere tra più alternative, impostare `SCHEMA_MAPPING` come stringa JSON nelle variabili del Worker MCP, ad esempio (solo se queste colonne esistono davvero):
-
-```json
-{
-  "calls": {
-    "id": "id",
-    "phone": "from_number",
-    "time": "started_at",
-    "time_format": "iso"
-  },
-  "call_summaries": {
-    "call": "call_id",
-    "summary": "summary",
-    "actions": "actions_required"
-  },
-  "outbound_requests": { "time": "started_at", "time_format": "iso" }
-}
-```
-
-`time_format` accetta `iso` (default: ISO 8601 o datetime SQLite), `unix_seconds` o `unix_milliseconds`. Le date `from`/`to` degli strumenti devono includere il fuso orario; per “oggi in Giappone” usare inizio/fine della giornata con `+09:00`. I filtri non supportati dallo schema causano un errore, senza essere ignorati silenziosamente. La ricerca tratta `%`, `_` e barre come caratteri letterali.
-
-Il join dei riepiloghi usa `call_summaries.call_id = calls.id`, oppure `conversation_id` quando disponibile in entrambe le tabelle. Verificare che la relazione rappresenti effettivamente le chiamate e la cardinalità dei riepiloghi nel proprio database. Gli identificativi Telnyx/conversation disponibili sono restituiti per la correlazione; questo progetto non interroga o modifica Telnyx.
-
-## Deployment dei due Worker
-
-Per il primo deployment, il bootstrap pubblica AuthServer senza il binding di ritorno alla conferma. Questo evita riferimenti circolari a entrypoint non ancora pubblicati. Dopo aver impostato gli ID e il secret proprietario:
-
-```sh
-npx wrangler login
-npm run deploy:bootstrap
 npm run deploy:mcp
-npm run deploy:auth
 ```
 
-Il bootstrap aggiorna soltanto il Worker auth. Finché non si completa `deploy:auth`, la conferma outbound non è disponibile. Per gli aggiornamenti successivi bastano i due comandi `deploy:mcp` e `deploy:auth`; il bootstrap è destinato al primo collegamento. Non dirigere nessun deployment a `personal-phone-assistant`.
+Non eseguire bootstrap o `deploy:auth` per questo rilascio. Il sorgente auth non contiene più la pagina outbound; l’auth già pubblicato non viene aggiornato. Il suo vecchio binding verso `ApprovalServer` richiede di mantenere questo entrypoint come **tombstone inerte**: `describeTicket` e `confirmTicket` restituiscono sempre `WEB_APPROVAL_REMOVED`, senza inviare approvazioni. La vecchia route auth può restare presente fino a un aggiornamento auth separatamente autorizzato, ma non può approvare o avviare chiamate. Nessun nuovo link viene generato.
 
-I secret esistenti vengono mantenuti dai normali deployment Wrangler; le variabili non secret sono definite nei file Wrangler. Conservare in questi file anche le configurazioni `SCHEMA_MAPPING` e outbound scelte dalla dashboard, per evitare che un successivo deployment ripristini i default.
+`npm run build` effettua soltanto dry-run. La CI esegue controlli e non distribuisce. Non distribuire mai questo progetto al Worker telefonico `personal-phone-assistant`.
 
-## Collegamento a ChatGPT
+## Uso in ChatGPT
 
-Dopo il collaudo del deployment:
+Aggiornare la lista strumenti della connessione MCP esistente. Endpoint invariato:
 
-1. Aprire ChatGPT sul web e la schermata **Aggiungi un server MCP personalizzato** (le etichette possono variare secondo account/workspace).
-2. Nome: **Personal Phone Assistant**.
-3. URL: `https://personal-phone-assistant-mcp.barsaglini-gianluca.workers.dev/mcp`.
-4. Autenticazione: **OAuth**. Il server pubblica discovery e registrazione dinamica; non inserire secret Telnyx o outbound. Se il client richiede una configurazione manuale, usare gli endpoint pubblicati dalla discovery, non URL inventati.
-5. Nella pagina sul dominio auth verificare client e permessi, inserire il segreto proprietario e autorizzare. Richiedere `calls:read offline_access` per la lettura; aggiungere `calls:write calls:execute` quando si abilita outbound. Il refresh evita login a ogni operazione, entro la vita del grant.
-6. Provare «Quali telefonate ho ricevuto oggi, ora di Tokyo?» e verificare il risultato con il database. Verificare anche ricerca, dettagli e stato outbound.
+`https://personal-phone-assistant-mcp.barsaglini-gianluca.workers.dev/mcp`
 
-Il browser del proprietario mantiene una sessione firmata per 30 giorni per le conferme outbound; su un altro browser o dopo la scadenza occorre autenticarsi nuovamente. Il segreto non deve essere fornito a ChatGPT.
+Le consultazioni restano disponibili con OAuth. Per vedere le autorizzazioni dei tool outbound può essere necessaria una riautorizzazione con gli scope aggiuntivi; questa non abilita l’esecuzione reale. Non selezionare approvazioni permanenti come sostituto del consenso per una specifica telefonata.
 
-Documentazione ufficiale: [collegare e testare in ChatGPT](https://developers.openai.com/plugins/deploy/connect-chatgpt), [autenticazione OAuth](https://developers.openai.com/plugins/build/auth). La disponibilità della schermata e le policy del workspace dipendono dall’account: non sono state verificate sul tuo account.
-
-## Abilitazione controllata dell’outbound
-
-Non abilitare prima del collaudo della fase A in produzione. Non è stata effettuata alcuna chiamata reale durante lo sviluppo.
-
-1. Verificare il contratto del Worker telefonico esistente, senza modificarlo. L’adattatore attuale usa:
-   - `POST /outbound/requests`, Bearer `OUTBOUND_API_SECRET`, body `{destination, language, instructions}`; l’obiettivo viene anteposto alle istruzioni. Si aspetta una risposta JSON **`{id: UUID, status: "pending_approval"}`**.
-   - `POST /outbound/requests/{id}/approve`, Bearer `OUTBOUND_APPROVAL_SECRET`. Una risposta 2xx indica invio; il risultato effettivo si legge poi da D1.
-   - L’adattatore di esecuzione presume D1 `outbound_requests`: `id`, `destination`, `instructions`, `language`, `status`. **Lo schema reale verificato usa `destination_number`: adattare questo modulo prima di abilitare outbound.** Il Worker telefonico deve già applicare atomicamente il controllo dello stato pending prima dell’esecuzione, anche contro richieste provenienti da altri client.
-
-   Se la forma effettiva differisce, adattare **solo** `workers/mcp/src/outbound.ts` e i test, senza modificare il Worker telefonico. Il repository non può dedurre questo contratto da un’API protetta.
-
-2. Sul solo Worker MCP, impostare come secret le due credenziali già esistenti, distinte: `OUTBOUND_API_SECRET`, `OUTBOUND_APPROVAL_SECRET`. Non serve una API key Telnyx.
-3. Impostare `OUTBOUND_ALLOWED_DESTINATIONS` come stringa JSON di numeri E.164 autorizzati esplicitamente, per esempio `["+81NUMERO_REALE"]` sostituendo un numero valido; la lista vuota blocca ogni destinazione. Aggiungere numeri richiede una scelta del proprietario, non dati provenienti da chiamate inbound.
-4. Solo dopo verifica impostare `OUTBOUND_CONTRACT_VERIFIED="true"` e `OUTBOUND_ENABLED="true"` nel file MCP e ridistribuire soltanto MCP. Aggiornare la lista strumenti della connessione ChatGPT e riautorizzare con i permessi aggiuntivi se richiesto.
-5. In ChatGPT creare la richiesta con `create_outbound_request`. `request_key` è un UUID stabile: riutilizzare la stessa chiave per la stessa richiesta quando si ripete un tentativo.
-6. Chiedere l’approvazione con `approve_outbound_request`: il tool restituisce un link valido 10 minuti. Aprirlo nel browser, leggere **numero, lingua e istruzioni complete**, poi premere **Confermo: avvia questa telefonata**. Il semplice accesso al link non avvia nulla. Il tool da solo non avvia nulla.
-7. Tornare in ChatGPT e usare `get_outbound_status` per stato, durata ed errori disponibili.
-
-La conferma è un clic nel browser per ogni telefonata a pagamento, senza login ripetuto quando la sessione è ancora valida. È intenzionalmente separata dal possesso del token OAuth e dai dati non attendibili delle chiamate.
-
-### Idempotenza e risultati incerti
-
-La creazione riserva persistentemente la `request_key` prima della chiamata API; una chiave riutilizzata con dati diversi viene rifiutata. L’esecuzione riserva persistentemente l’ID richiesta prima dell’invio dell’approvazione. Concorrenza e ticket alternativi sullo stesso ID non possono causare un secondo invio da questo MCP.
-
-Non esiste una transazione distribuita tra Durable Object e API telefonica: un timeout può significare che il servizio ha già ricevuto la richiesta. In quel caso il progetto conserva il blocco e **non ritenta automaticamente**, anche se la chiamata non è partita. Controllare D1/il servizio telefonico prima di qualunque intervento. Non aggirare il blocco con una nuova chiave e non cancellare lo storage delle esecuzioni per riprovare.
-
-## Revoca e protezioni
-
-- Il client può usare l’endpoint di revoca OAuth pubblicato nella discovery (nella versione fissata coincide con `/oauth/token`, distinguendo la richiesta mediante il parametro `token`). I test verificano access token rifiutati dopo la revoca nel runtime locale.
-- **Limite KV:** Cloudflare KV è eventualmente consistente. Non promettere revoca istantanea globale del singolo token sulla sola cancellazione KV.
-- Per invalidare tutte le credenziali e sessioni del proprietario, aumentare `OWNER_TOKEN_VERSION` in **entrambi** i file e distribuire **prima MCP, poi auth**. Dal momento in cui il nuovo MCP è attivo, i vecchi grant sono rifiutati anche se presenti in KV; le vecchie sessioni browser non passano più su auth dopo il relativo aggiornamento. Il rollout Cloudflare ha comunque i propri tempi di propagazione. Per un incidente, disabilitare inoltre il Worker MCP dalla dashboard.
-- Ruotare `OWNER_LOGIN_SECRET` invalida le sessioni browser firmate ma **non** sostituisce la rotazione di versione per i token OAuth.
-- Per bloccare soltanto le nuove telefonate: impostare `OUTBOUND_ENABLED="false"` e ridistribuire MCP; i ticket già creati non sono più eseguibili.
-- I dati delle telefonate sono etichettati come non attendibili nelle istruzioni MCP e nelle risposte. Le annotazioni MCP sono aiuti al client; le vere protezioni sono scope, autenticazione, CSRF, destinazioni consentite, stato D1 e conferma browser.
-- Non vengono scritti log applicativi di numeri, istruzioni o credenziali. I link di conferma sono temporanei ma riservati: non condividerli e non abilitare logging completo delle query URL. Le risposte HTML di autenticazione sono `no-store`, senza referrer verso altri domini e con CSP restrittiva.
-
-## Limiti e verifica finale richiesta
-
-Lo schema reale è stato verificato con una sessione Cloudflare autenticata e adattato tramite `SCHEMA_MAPPING`, senza cambiare il database. I test automatici locali usano dati sintetici e un contratto outbound simulato; il rapporto di deployment distingue le verifiche pubbliche completate. Il contratto outbound reale e la connessione al tuo account ChatGPT richiedono verifiche separate. Non è stato cambiato **Assistant Speaks First**, nessun webhook, nessuna configurazione Telnyx e nessun dato del database esistente.
-
-ID namespace/database, schema D1, secret proprietario e binding/entrypoint sono stati configurati durante il deployment. Prima dell’uso completa il collegamento al tuo account ChatGPT e verifica le consultazioni dalla chat. Per outbound verificare inoltre contratto HTTP, secret distinti, allowlist e protezione atomica già presente nel servizio telefonico. Un’eventuale prova di chiamata reale resta un’azione intenzionale del proprietario e può generare costi.
-
-Riferimento dell’architettura: [Cloudflare split-workers](https://github.com/cloudflare/workers-oauth-provider/tree/main/examples/split-workers). Lo starter ufficiale contiene un login dimostrativo: qui è stato sostituito con autenticazione proprietario, consenso e conferma separata delle telefonate.
+La revoca standard è pubblicata nella discovery. KV è eventualmente consistente: per invalidare tutti i vecchi grant aggiornare `OWNER_TOKEN_VERSION` in entrambi i Worker con un rilascio coordinato; non fare questa operazione nel rilascio MCP corrente. L’ultimo collaudo pubblico di lettura è documentato in [deployment](docs/deployment.md); il nuovo limite di consenso e i test sono in [sicurezza outbound](docs/outbound-confirmation.md).

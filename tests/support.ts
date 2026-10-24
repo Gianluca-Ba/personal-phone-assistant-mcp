@@ -73,5 +73,5 @@ export async function login(
       }),
     })
   ).json();
-  return tokens;
+  return { ...tokens, clientId: client.client_id };
 }

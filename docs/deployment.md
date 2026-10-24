@@ -1,4 +1,6 @@
-# Deployment nell’account Cloudflare esistente
+# Deployment iniziale — rapporto storico
+
+**Rapporto storico del primo deployment.** Il flusso outbound attuale è descritto in [sicurezza outbound](outbound-confirmation.md): nessuna conferma web, nessun link, esecuzione reale bloccata. I binding auth e il relativo codice già pubblicato non vengono ridistribuiti nel rilascio solo MCP.
 
 Sono stati aggiornati esclusivamente `personal-phone-assistant-auth` e `personal-phone-assistant-mcp`, nell’ordine bootstrap → MCP → auth. Il Worker telefonico `personal-phone-assistant`, le impostazioni Telnyx e le tabelle D1 non sono stati modificati. Outbound è disabilitato (`OUTBOUND_ENABLED=false`, `OUTBOUND_CONTRACT_VERIFIED=false`, allowlist vuota).
 

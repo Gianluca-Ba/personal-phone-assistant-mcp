@@ -21,6 +21,10 @@ if (
   mcp.name !== "personal-phone-assistant-mcp"
 )
   fail("Only the two integration Workers may be deployed.");
+if (auth.main !== "src/index.ts" || mcp.main !== "src/index.ts")
+  fail(
+    "Only production entrypoints may be deployed; test consent adapters are prohibited.",
+  );
 if (
   auth.kv_namespaces[0].id.includes("REPLACE") ||
   mcp.d1_databases[0].database_id.includes("REPLACE")

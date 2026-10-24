@@ -154,6 +154,8 @@ it("runs discovery, owner consent, PKCE, MCP, refresh and revocation across real
     "get_call_details",
     "search_calls",
     "get_outbound_status",
+    "create_outbound_request",
+    "approve_outbound_request",
   ]);
   const invalid = (await (
     await rpc("tools/call", { name: "list_calls", arguments: { limit: 999 } })

@@ -1,0 +1,17 @@
+{
+  "verified_at": "2026-10-24T23:08:19.432Z",
+  "mcp_version": "827e5866-1c6a-413d-b65a-ab6705fdbd30",
+  "tests_passed": 13,
+  "real_phone_calls_performed": false,
+  "production_consent_adapter": "rejects_all",
+  "checks": {
+    "personal-phone-assistant-auth_unchanged": true,
+    "personal-phone-assistant_unchanged": true,
+    "outbound_disabled": true,
+    "allowlist_empty": true,
+    "persistent_rate_limit_configured": true,
+    "anonymous_denied": true,
+    "invalid_token_approval_denied": true,
+    "oauth_discovery_unchanged": true
+  }
+}
