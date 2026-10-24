@@ -67,7 +67,7 @@ function page(body: string, setCookie?: string) {
       headers: {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "no-store",
-        "Referrer-Policy": "no-referrer",
+        "Referrer-Policy": "same-origin",
         "Content-Security-Policy":
           "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
         ...(setCookie ? { "Set-Cookie": setCookie } : {}),
@@ -100,7 +100,7 @@ export async function confirmation(request: Request, env: ConfirmationEnv) {
     return page(
       body +
         `<form method="post" action="/confirm"><input type="hidden" name="nonce" value="${nonce}">${logged ? "" : '<label>Segreto proprietario <input type="password" name="secret" required maxlength="256" autocomplete="current-password"></label>'}<button type="submit">${logged ? "Confermo: avvia questa telefonata" : "Accedi e mostra i dettagli"}</button></form>`,
-      `confirm_nonce=${nonce}; HttpOnly; Secure; SameSite=Strict; Path=/confirm; Max-Age=600`,
+      `confirm_nonce=${nonce}; HttpOnly; Secure; SameSite=Lax; Path=/confirm; Max-Age=600`,
     );
   }
   if (request.method !== "POST")
@@ -143,7 +143,7 @@ export async function confirmation(request: Request, env: ConfirmationEnv) {
         Location: `/confirm?id=${id}&ticket=${ticket}`,
         "Set-Cookie": await sessionCookie(env),
         "Cache-Control": "no-store",
-        "Referrer-Policy": "no-referrer",
+        "Referrer-Policy": "same-origin",
       },
     });
   }

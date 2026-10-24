@@ -12,7 +12,7 @@ Integrazione TypeScript per l’assistente telefonico Telnyx già operativo. Il 
 - Durable Object SQLite per idempotenza, conferme monouso e prenotazione persistente dell’invio. Lo storage è separato dal D1 telefonico, nello stesso Worker MCP: nessun terzo Worker di produzione.
 - Test locali con i due Worker, KV, D1 e service binding reali nel runtime workerd. La telefonia nei test è esclusivamente un servizio simulato.
 
-**Stato:** codice e test locali disponibili. Il collaudo sul vero D1, il collegamento ChatGPT e il contratto HTTP del Worker telefonico richiedono configurazione dell’account Cloudflare. L’outbound è disabilitato per default e deve restare tale fino al collaudo della lettura in produzione.
+**Stato:** i due Worker sono stati distribuiti nell’account Cloudflare esistente. ID delle risorse, binding e schema D1 reale sono stati verificati in sola lettura; la configurazione riproducibile è inclusa nel repository. Il collaudo pubblico è riuscito sui quattro strumenti di sola lettura, inclusi refresh e revoca OAuth. Vedi [rapporto di deployment](docs/deployment.md) per risorse, versioni ed esiti. Outbound resta disabilitato.
 
 ## Architettura
 
@@ -139,7 +139,7 @@ Non abilitare prima del collaudo della fase A in produzione. Non è stata effett
 1. Verificare il contratto del Worker telefonico esistente, senza modificarlo. L’adattatore attuale usa:
    - `POST /outbound/requests`, Bearer `OUTBOUND_API_SECRET`, body `{destination, language, instructions}`; l’obiettivo viene anteposto alle istruzioni. Si aspetta una risposta JSON **`{id: UUID, status: "pending_approval"}`**.
    - `POST /outbound/requests/{id}/approve`, Bearer `OUTBOUND_APPROVAL_SECRET`. Una risposta 2xx indica invio; il risultato effettivo si legge poi da D1.
-   - D1 `outbound_requests`: `id`, `destination`, `instructions`, `language`, `status`. Il Worker telefonico deve già applicare atomicamente il controllo dello stato pending prima dell’esecuzione, anche contro richieste provenienti da altri client.
+   - L’adattatore di esecuzione presume D1 `outbound_requests`: `id`, `destination`, `instructions`, `language`, `status`. **Lo schema reale verificato usa `destination_number`: adattare questo modulo prima di abilitare outbound.** Il Worker telefonico deve già applicare atomicamente il controllo dello stato pending prima dell’esecuzione, anche contro richieste provenienti da altri client.
 
    Se la forma effettiva differisce, adattare **solo** `workers/mcp/src/outbound.ts` e i test, senza modificare il Worker telefonico. Il repository non può dedurre questo contratto da un’API protetta.
 
@@ -166,12 +166,12 @@ Non esiste una transazione distribuita tra Durable Object e API telefonica: un t
 - Ruotare `OWNER_LOGIN_SECRET` invalida le sessioni browser firmate ma **non** sostituisce la rotazione di versione per i token OAuth.
 - Per bloccare soltanto le nuove telefonate: impostare `OUTBOUND_ENABLED="false"` e ridistribuire MCP; i ticket già creati non sono più eseguibili.
 - I dati delle telefonate sono etichettati come non attendibili nelle istruzioni MCP e nelle risposte. Le annotazioni MCP sono aiuti al client; le vere protezioni sono scope, autenticazione, CSRF, destinazioni consentite, stato D1 e conferma browser.
-- Non vengono scritti log applicativi di numeri, istruzioni o credenziali. I link di conferma sono temporanei ma riservati: non condividerli e non abilitare logging completo delle query URL. Le risposte HTML di autenticazione sono `no-store`, senza referrer e con CSP restrittiva.
+- Non vengono scritti log applicativi di numeri, istruzioni o credenziali. I link di conferma sono temporanei ma riservati: non condividerli e non abilitare logging completo delle query URL. Le risposte HTML di autenticazione sono `no-store`, senza referrer verso altri domini e con CSP restrittiva.
 
 ## Limiti e verifica finale richiesta
 
-Lo schema e i dati reali non sono accessibili senza una sessione Cloudflare autenticata. I test usano dati sintetici e un contratto API simulato; non certificano la configurazione reale di Telnyx, D1 o ChatGPT. Non è stato cambiato **Assistant Speaks First**, nessun webhook, nessuna configurazione Telnyx e nessun dato del database esistente.
+Lo schema reale è stato verificato con una sessione Cloudflare autenticata e adattato tramite `SCHEMA_MAPPING`, senza cambiare il database. I test automatici locali usano dati sintetici e un contratto outbound simulato; il rapporto di deployment distingue le verifiche pubbliche completate. Il contratto outbound reale e la connessione al tuo account ChatGPT richiedono verifiche separate. Non è stato cambiato **Assistant Speaks First**, nessun webhook, nessuna configurazione Telnyx e nessun dato del database esistente.
 
-Prima dell’uso: verificare colonne e tipi data D1, ID namespace/database, secret proprietario, binding ed entrypoint, consultazioni reali da ChatGPT. Per outbound verificare inoltre contratto HTTP, secret distinti, allowlist e protezione atomica già presente nel servizio telefonico. Un’eventuale prova di chiamata reale resta un’azione intenzionale del proprietario e può generare costi.
+ID namespace/database, schema D1, secret proprietario e binding/entrypoint sono stati configurati durante il deployment. Prima dell’uso completa il collegamento al tuo account ChatGPT e verifica le consultazioni dalla chat. Per outbound verificare inoltre contratto HTTP, secret distinti, allowlist e protezione atomica già presente nel servizio telefonico. Un’eventuale prova di chiamata reale resta un’azione intenzionale del proprietario e può generare costi.
 
 Riferimento dell’architettura: [Cloudflare split-workers](https://github.com/cloudflare/workers-oauth-provider/tree/main/examples/split-workers). Lo starter ufficiale contiene un login dimostrativo: qui è stato sostituito con autenticazione proprietario, consenso e conferma separata delle telefonate.

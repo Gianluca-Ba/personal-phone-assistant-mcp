@@ -16,7 +16,8 @@
     "predeploy:auth": "node scripts/preflight.mjs",
     "predeploy:mcp": "node scripts/preflight.mjs",
     "deploy:bootstrap": "node scripts/bootstrap.mjs",
-    "format": "prettier --write workers tests scripts *.json .github/workflows/*.yml README.md"
+    "format": "prettier --write workers tests scripts *.json .github/workflows/*.yml README.md",
+    "smoke:live": "node scripts/smoke-live.mjs"
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "1.2.4",

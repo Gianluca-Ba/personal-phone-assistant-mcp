@@ -1,9 +1,11 @@
+import { parse as parseConfig } from "jsonc-parser";
 import { expect, it } from "vitest";
 import {
   mkdtempSync,
   mkdirSync,
   copyFileSync,
   readFileSync,
+  writeFileSync,
   rmSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
@@ -21,6 +23,10 @@ it("configuration scripts accept JSONC, reject placeholders, and never target th
       "workers/mcp/wrangler.jsonc",
     ])
       copyFileSync(file, join(temp, file));
+    const authPath = join(temp, "workers/auth/wrangler.jsonc");
+    const authConfig = parseConfig(readFileSync(authPath, "utf8"));
+    authConfig.kv_namespaces[0].id = "REPLACE_WITH_EXISTING_OAUTH_KV_ID";
+    writeFileSync(authPath, JSON.stringify(authConfig));
     const run = (script: string, args: string[] = []) =>
       spawnSync(process.execPath, [join(temp, "scripts", script), ...args], {
         encoding: "utf8",

@@ -51,7 +51,7 @@ export async function login(
     headers: {
       "CF-Connecting-IP": `192.0.2.${Math.floor(Math.random() * 200) + 1}`,
       Origin: issuer,
-      Cookie: `consent=${nonce}`,
+      Cookie: consent.headers.get("set-cookie")!.split(";")[0],
       "Content-Type": "application/x-www-form-urlencoded",
     },
     body: new URLSearchParams({ nonce, secret }),

@@ -18,7 +18,7 @@
     {
       "binding": "DB",
       "database_name": "phone-assistant-db",
-      "database_id": "REPLACE_WITH_EXISTING_D1_ID",
+      "database_id": "f8604adb-ac12-4298-a9be-327727a20675",
     },
   ],
   "vars": {
@@ -26,6 +26,7 @@
     "OUTBOUND_ENABLED": "false",
     "OUTBOUND_CONTRACT_VERIFIED": "false",
     "OUTBOUND_ALLOWED_DESTINATIONS": "[]",
+    "SCHEMA_MAPPING": "{\"calls\":{\"id\":\"id\",\"phone\":\"caller_number\",\"destination\":\"destination_number\",\"time\":\"created_at\",\"time_format\":\"iso\"},\"call_summaries\":{\"call\":\"call_id\",\"summary\":\"summary_it\",\"actions\":\"action_required\"},\"outbound_requests\":{\"phone\":\"destination_number\",\"time\":\"created_at\",\"time_format\":\"iso\"}}",
   },
   "durable_objects": {
     "bindings": [
@@ -41,4 +42,9 @@
       "new_sqlite_classes": ["OutboundGate"],
     },
   ],
+  "preview_urls": false,
+  "workers_dev": true,
+  "observability": {
+    "enabled": false,
+  },
 }

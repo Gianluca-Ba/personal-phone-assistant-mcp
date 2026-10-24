@@ -1,0 +1,25 @@
+{
+  "verified_at": "2026-10-24T15:07:21.467Z",
+  "resource": "https://personal-phone-assistant-mcp.barsaglini-gianluca.workers.dev/mcp",
+  "outbound_enabled": false,
+  "checks": {
+    "anonymous_denied": true,
+    "invalid_token_denied": true,
+    "protected_resource_discovery": true,
+    "oauth_discovery": true,
+    "owner_login_and_pkce": true,
+    "mcp_initialization": true,
+    "only_four_read_only_tools": true,
+    "list_calls": true,
+    "get_call_details": true,
+    "search_calls": true,
+    "real_summary_mapping": true,
+    "date_filters": true,
+    "get_outbound_status": true,
+    "outbound_unavailable": true,
+    "refresh": true,
+    "revocation": true
+  },
+  "calls_read": 10,
+  "outbound_requests_read": 5
+}

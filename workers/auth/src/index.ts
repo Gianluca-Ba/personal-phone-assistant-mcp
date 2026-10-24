@@ -46,16 +46,22 @@ async function equal(a: string, b: string) {
     0
   );
 }
-function page(body: string, cookie?: string) {
+function page(body: string, cookie?: string, redirectUri?: string) {
+  const redirect = redirectUri ? new URL(redirectUri) : undefined;
+  const redirectSource = redirect
+    ? redirect.origin === "null"
+      ? redirect.protocol
+      : redirect.origin
+    : "";
   return new Response(
     `<!doctype html><html lang="it"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Personal Phone Assistant</title><body><h1>Collega il tuo assistente telefonico</h1>${body}</body></html>`,
     {
       headers: {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "no-store",
-        "Referrer-Policy": "no-referrer",
-        "Content-Security-Policy":
-          "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+        "Referrer-Policy": "same-origin",
+        "X-Frame-Options": "DENY",
+        "Content-Security-Policy": `default-src 'none'; form-action 'self' ${redirectSource}; frame-ancestors 'none'; base-uri 'none'`,
         ...(cookie ? { "Set-Cookie": cookie } : {}),
       },
     },
@@ -82,14 +88,13 @@ async function authorize(request: Request, env: Env) {
     }
     if (auth.scope.some((s) => !scopes.includes(s)))
       return new Response("Unsupported scope", { status: 400 });
-    const nonce = crypto.randomUUID();
-    await env.OAUTH_KV.put(`consent:${nonce}`, JSON.stringify(auth), {
-      expirationTtl: 600,
-    });
+    const consent = await oauth.beginConsent(auth);
+    const nonce = consent.handle;
     const client = await oauth.describeConsent(auth);
     return page(
       `<p>Client: ${escape(client.clientName)}</p><p>Destinazione dell’autorizzazione: <strong>${escape(client.redirectHost)}</strong></p><p>${client.clientDomain ? "Dominio verificato del client: " + escape(client.clientDomain) : "Il nome del client è dichiarato dal client e non è verificato."}</p>${client.redirectIsLoopback ? "<p>La destinazione è un’app locale: verifica quale applicazione stai autorizzando.</p>" : ""}<p>Permessi: ${escape(auth.scope.join(", "))}. calls:read consulta i dati privati; calls:write prepara richieste; calls:execute permette di richiedere la conferma per avviare una telefonata a pagamento. L’avvio richiede sempre un clic separato del proprietario.</p><form method="post"><input type="hidden" name="nonce" value="${nonce}"><label>Segreto proprietario <input type="password" name="secret" required autocomplete="current-password" maxlength="256"></label><button type="submit">Autorizza accesso</button></form>`,
-      `consent=${nonce}; HttpOnly; Secure; SameSite=Strict; Path=/authorize; Max-Age=600`,
+      consent.headers.get("Set-Cookie")!,
+      auth.redirectUri,
     );
   }
   if (request.method !== "POST")
@@ -106,35 +111,29 @@ async function authorize(request: Request, env: Env) {
   if (body.length > 4096) return new Response("Too large", { status: 413 });
   const form = new URLSearchParams(body),
     nonce = form.get("nonce") ?? "";
-  const cookie = request.headers
-    .get("Cookie")
-    ?.match(/(?:^|;\s*)consent=([^;]+)/)?.[1];
-  if (!/^[a-f0-9-]{36}$/.test(nonce) || cookie !== nonce)
-    return new Response("Invalid consent", { status: 403 });
-  const stored = await env.OAUTH_KV.get(`consent:${nonce}`);
-  if (
-    !stored ||
-    !(await equal(form.get("secret") ?? "", env.OWNER_LOGIN_SECRET))
-  )
-    return new Response("Invalid credentials or expired consent", {
-      status: 403,
-    });
-  await env.OAUTH_KV.delete(`consent:${nonce}`);
+  if (!(await equal(form.get("secret") ?? "", env.OWNER_LOGIN_SECRET)))
+    return new Response("Invalid credentials", { status: 403 });
+  let approved;
+  try {
+    approved = await oauth.approveConsent(request, nonce);
+  } catch (error) {
+    if (error instanceof AuthorizationError)
+      return new Response(
+        "Invalid consent: reload the authorization page and allow first-party cookies.",
+        { status: 403 },
+      );
+    throw error;
+  }
   const result = await oauth.completeAuthorization({
-    request: JSON.parse(stored),
+    request: approved.request,
     userId: "owner",
     metadata: {},
-    scope: JSON.parse(stored).scope,
+    scope: approved.request.scope,
     props: { userId: "owner", version: env.OWNER_TOKEN_VERSION },
   });
-  const headers = new Headers({
-    Location: result.redirectTo,
-    "Cache-Control": "no-store",
-  });
-  headers.append(
-    "Set-Cookie",
-    "consent=; HttpOnly; Secure; SameSite=Strict; Path=/authorize; Max-Age=0",
-  );
+  const headers = new Headers(approved.headers);
+  headers.set("Location", result.redirectTo);
+  headers.set("Cache-Control", "no-store");
   headers.append("Set-Cookie", await sessionCookie(env));
   return new Response(null, { status: 302, headers });
 }

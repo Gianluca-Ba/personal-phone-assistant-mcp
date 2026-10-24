@@ -8,7 +8,7 @@ const harness = createTestHarness({
       configPath: "workers/auth/wrangler.jsonc",
       secrets: { OWNER_LOGIN_SECRET: secret, OWNER_TOKEN_VERSION: "1" },
     },
-    { configPath: "workers/mcp/wrangler.jsonc" },
+    { configPath: "workers/mcp/wrangler.jsonc", vars: { SCHEMA_MAPPING: "" } },
     {
       config: {
         name: "personal-phone-assistant",
@@ -81,12 +81,16 @@ it("runs discovery, owner consent, PKCE, MCP, refresh and revocation across real
     url.searchParams.set(k, String(v));
   const consent = await auth.fetch(url, { redirect: "manual" });
   expect(consent.status).toBe(200);
+  expect(consent.headers.get("Referrer-Policy")).toBe("same-origin");
+  expect(consent.headers.get("Content-Security-Policy")).toContain(
+    "https://client.example",
+  );
   const html = await consent.text();
   const nonce = /name="nonce" value="([^"]+)"/.exec(html)![1];
   const headers = {
     "Content-Type": "application/x-www-form-urlencoded",
     Origin: issuer,
-    Cookie: `consent=${nonce}`,
+    Cookie: consent.headers.get("set-cookie")!.split(";")[0],
   };
   const submit = (s: string, h = headers) =>
     auth.fetch(issuer + "/authorize", {
@@ -100,8 +104,13 @@ it("runs discovery, owner consent, PKCE, MCP, refresh and revocation across real
     (await submit(secret, { ...headers, Origin: "https://evil.example" }))
       .status,
   ).toBe(403);
+  expect((await submit(secret, { ...headers, Origin: "null" })).status).toBe(
+    403,
+  );
+  expect((await submit(secret, { ...headers, Cookie: "" })).status).toBe(403);
   const approved = await submit(secret);
   expect(approved.status).toBe(302);
+  expect((await submit(secret)).status).toBe(403);
   const location = new URL(approved.headers.get("location")!);
   expect(location.searchParams.get("state")).toBe("state-test");
   const tokenResponse = await auth.fetch(meta.token_endpoint, {

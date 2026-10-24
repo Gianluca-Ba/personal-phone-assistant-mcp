@@ -11,6 +11,7 @@ const harness = createTestHarness({
     {
       configPath: "workers/mcp/wrangler.jsonc",
       vars: {
+        SCHEMA_MAPPING: "",
         OUTBOUND_ENABLED: "true",
         OUTBOUND_CONTRACT_VERIFIED: "true",
         OUTBOUND_ALLOWED_DESTINATIONS: '["+819012345678"]',

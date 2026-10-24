@@ -6,7 +6,7 @@
   "kv_namespaces": [
     {
       "binding": "OAUTH_KV",
-      "id": "REPLACE_WITH_EXISTING_OAUTH_KV_ID",
+      "id": "800d14564916429199eea261a1b71cab",
     },
   ],
   "ratelimits": [
@@ -29,4 +29,9 @@
       "entrypoint": "ApprovalServer",
     },
   ],
+  "preview_urls": false,
+  "workers_dev": true,
+  "observability": {
+    "enabled": false,
+  },
 }
