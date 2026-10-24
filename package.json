@@ -1,0 +1,38 @@
+{
+  "name": "personal-phone-assistant-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.tests.json",
+    "test": "vitest run",
+    "build": "wrangler deploy --dry-run --config workers/auth/wrangler.jsonc && wrangler deploy --dry-run --config workers/mcp/wrangler.jsonc",
+    "deploy:auth": "wrangler deploy --config workers/auth/wrangler.jsonc",
+    "deploy:mcp": "wrangler deploy --config workers/mcp/wrangler.jsonc",
+    "configure": "node scripts/configure.mjs",
+    "predeploy:auth": "node scripts/preflight.mjs",
+    "predeploy:mcp": "node scripts/preflight.mjs",
+    "deploy:bootstrap": "node scripts/bootstrap.mjs",
+    "format": "prettier --write workers tests scripts *.json .github/workflows/*.yml README.md"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "1.2.4",
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261024.1",
+    "@types/node": "22.20.5",
+    "jsonc-parser": "3.3.1",
+    "prettier": "3.9.10",
+    "typescript": "7.0.2",
+    "vitest": "5.0.5",
+    "wrangler": "4.152.0"
+  },
+  "overrides": {
+    "undici": "7.30.1"
+  }
+}

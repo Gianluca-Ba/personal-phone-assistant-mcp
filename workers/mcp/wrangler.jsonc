@@ -1,0 +1,44 @@
+{
+  "name": "personal-phone-assistant-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "services": [
+    {
+      "binding": "AUTH_SERVER",
+      "service": "personal-phone-assistant-auth",
+      "entrypoint": "AuthServer",
+    },
+    {
+      "binding": "PHONE_API",
+      "service": "personal-phone-assistant",
+    },
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "phone-assistant-db",
+      "database_id": "REPLACE_WITH_EXISTING_D1_ID",
+    },
+  ],
+  "vars": {
+    "OWNER_TOKEN_VERSION": "1",
+    "OUTBOUND_ENABLED": "false",
+    "OUTBOUND_CONTRACT_VERIFIED": "false",
+    "OUTBOUND_ALLOWED_DESTINATIONS": "[]",
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "OUTBOUND_GATE",
+        "class_name": "OutboundGate",
+      },
+    ],
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["OutboundGate"],
+    },
+  ],
+}
