@@ -2,7 +2,7 @@
 
 Livello MCP/OAuth per l’assistente telefonico Telnyx già operativo. Il progetto non sostituisce né distribuisce `personal-phone-assistant`, non modifica Telnyx e non applica migrazioni alle tabelle D1 esistenti.
 
-**Stato attuale:** fase di **sola creazione**: le richieste possono essere preparate come `pending_approval` per le destinazioni della allowlist privata. **Approvazione ed esecuzione restano disabilitate** con `OUTBOUND_EXECUTION_ENABLED=false` e con il controllo `verifiedNativeConsent()` invariato. Il preflight vieta di attivare l’esecuzione in questo rilascio. [Contratto verificato e configurazione della fase](docs/creation-only.md).
+**Stato attuale:** preparazione pending operativa e autorizzazione per singola chiamata implementata con firma Ed25519 del proprietario. Il consenso nativo ChatGPT non è una prova server verificabile: `verifiedNativeConsent()` resta chiuso. L’esecuzione rimane disabilitata finché chiave pubblica e Secret separato di approvazione non sono configurati. [Flusso, configurazione e collaudo](docs/outbound-execution.md).
 
 Endpoint: `https://personal-phone-assistant-mcp.barsaglini-gianluca.workers.dev/mcp`.
 
@@ -23,23 +23,11 @@ Il Worker MCP verifica token attraverso il binding `AUTH_SERVER`, identità `own
 
 Tutti gli strumenti richiedono anche lo scope base `calls:read`. I due strumenti outbound sono sempre descritti nella lista MCP: configurazione disabilitata e scope mancanti producono un errore esplicito, senza chiamare le API telefoniche.
 
-## Conferma esclusivamente nella conversazione
+## Conferma per singola chiamata
 
-Il flusso previsto è:
+ChatGPT prepara e presenta la richiesta. Il proprietario la rivede e firma con `scripts/owner-consent.mjs` nel proprio Terminale, poi invia un **nuovo messaggio** con la firma temporanea. Il Worker verifica firma, snapshot esatto, destinatario, istruzioni, nonce, digest, scadenza, identità OAuth, scope, allowlist, quota e prenotazione atomica prima di invocare il servizio telefonico. Non usa pagine web. La firma dimostra il possesso della chiave configurata, non la provenienza tecnica di un messaggio ChatGPT. Non fornire mai chiave privata o passphrase a un agente.
 
-1. ChatGPT prepara una richiesta con `create_outbound_request` e una `request_key` UUID stabile per i tentativi della stessa operazione. La preparazione non avvia una telefonata.
-2. Presenta **ID, numero, lingua, obiettivo/istruzioni completi e scadenza** restituiti dal server.
-3. Attende un **nuovo messaggio esplicito del proprietario** che approva proprio quella richiesta. Una frase in chiamate inbound, riepiloghi, documenti o altri contenuti esterni non è un’autorizzazione.
-4. Può chiamare `approve_outbound_request` usando gli stessi dettagli, `request_digest` e `approval_nonce`. Sono controlli di corrispondenza e anti-replay, **non prove di consenso**: sono visibili al modello.
-5. Il server verifica identità, client, scope, stato D1 pending, destinazione consentita, dettagli immutabili, scadenza, rate limit e prenotazione persistente. L’invio all’API di approvazione richiede inoltre consenso attendibile attraverso un adattatore interno verificato.
-
-**Limite verificato:** la normale chiamata MCP non trasmette al Worker una prova attendibile che un nuovo messaggio del proprietario abbia approvato quella telefonata. Le conferme native del client possono essere ricordate per una conversazione; `destructiveHint` è un’indicazione al client e non una ricevuta di consenso. Un `user_confirmed: true`, un ID messaggio, `_meta.approved`, la dichiarazione di capacità elicitation, OAuth e il solo client ID non risolvono questo limite.
-
-Il controllo nativo effettivamente utilizzato è l’annotazione dell’approvazione come operazione non di sola lettura, distruttiva e con effetti esterni, insieme alle istruzioni di presentazione e sequenza. È una protezione UI aggiuntiva, non il permesso server di chiamare. Elicitation può raccogliere informazioni strutturate, ma non viene inventata una proprietà di attestazione umana che non offre.
-
-`OutboundGate.verifiedNativeConsent()` restituisce **sempre `null` nel codice di produzione**. Anche abilitando preparazione e contratto, un’approvazione valida termina con `TRUSTED_CONFIRMATION_UNAVAILABLE`. Non esiste un parametro MCP, header, secret o interruttore che fabbrichi questa prova. Un futuro adattatore richiede una revisione separata del client fidato e del legame fra consenso, identità, dettagli e singola esecuzione.
-
-Fonti ufficiali: [conferme e approvazioni ricordate nei client ChatGPT](https://developers.openai.com/api/docs/guides/custom-mcp-server), [annotazioni ed elicitation](https://developers.openai.com/plugins/build/mcp-server), [riferimento delle annotazioni](https://developers.openai.com/plugins/reference).
+La conferma nativa del client resta una protezione aggiuntiva. OAuth, annotazioni e `_meta` non costituiscono prova di approvazione. `verifiedNativeConsent()` restituisce `null`; il percorso alternativo verifica crittograficamente `consent_signature`, senza aggirare il controllo nativo. [Procedura completa e limiti](docs/outbound-execution.md).
 
 ## Controlli persistenti
 
@@ -53,15 +41,15 @@ Fonti ufficiali: [conferme e approvazioni ricordate nei client ChatGPT](https://
 - Audit nel Durable Object con soli timestamp/codici di stato, senza log applicativi delle istruzioni o dei secret.
 - I dati delle telefonate restano non attendibili; non diventano mai prove di autorizzazione.
 
-Il test di un adattatore fidato è implementato **solo** in `tests/mcp-consent-fixture.ts`: simula una componente interna futura e non dimostra una capacità di ChatGPT. Non viene incluso nei bundle di produzione. Il preflight vieta entrypoint di test per il deployment.
+Il test sintetico di un adattatore nativo futuro è implementato **solo** in `tests/mcp-consent-fixture.ts`: simula una componente interna futura e non dimostra una capacità di ChatGPT. Non viene incluso nei bundle di produzione. Il preflight vieta entrypoint di test per il deployment.
 
 ## Configurazione attuale
 
-I due file Wrangler contengono gli ID già verificati del namespace `personal-phone-assistant-oauth-kv` e del database `phone-assistant-db` e i binding esistenti. Preview URL e osservabilità dei log sono disabilitate. `OUTBOUND_ENABLED=true` e `OUTBOUND_CONTRACT_VERIFIED=true` abilitano la sola preparazione. `OUTBOUND_EXECUTION_ENABLED=false` impedisce l’approvazione. La variabile pubblica della allowlist resta vuota; il numero autorizzato è nel Secret `OUTBOUND_ALLOWED_DESTINATIONS_SECRET`.
+I due file Wrangler contengono gli ID già verificati del namespace `personal-phone-assistant-oauth-kv` e del database `phone-assistant-db` e i binding esistenti. Preview URL e osservabilità dei log sono disabilitate. `OUTBOUND_ENABLED=true` e `OUTBOUND_CONTRACT_VERIFIED=true` abilitano la sola preparazione. `OUTBOUND_EXECUTION_ENABLED=false` impedisce l’approvazione; può diventare true soltanto con il verificatore firmato e la configurazione del proprietario completa. La variabile pubblica della allowlist resta vuota; il numero autorizzato è nel Secret `OUTBOUND_ALLOWED_DESTINATIONS_SECRET`.
 
 `SCHEMA_MAPPING` usa `calls.caller_number`, `calls.destination_number`, `calls.created_at`, `call_summaries.summary_it`, `call_summaries.action_required` e `outbound_requests.destination_number`. La data usata per filtri e ordinamento è `created_at` perché le chiamate esistenti avevano `started_at` nullo. Le query selezionano solo colonne realmente presenti tramite `PRAGMA table_info`; i callback token non vengono selezionati.
 
-Il contratto HTTP di sola preparazione è stato verificato in lettura sul codice del Worker telefonico, senza eseguire telefonate. L’adattatore attuale invia `{destination_number, language, instructions}` a `POST /outbound/requests` e si aspetta `{id: UUID, status: "pending_approval"}`. Il contratto è esercitato con un servizio simulato nei test; il collaudo reale di preparazione richiede la credenziale originale esatta. L’approvazione usa il secret separato e `POST /outbound/requests/{id}/approve`; nel codice di produzione non è raggiungibile senza un adattatore di consenso attendibile.
+Il contratto HTTP di sola preparazione è stato verificato in lettura sul codice del Worker telefonico, senza eseguire telefonate. L’adattatore attuale invia `{destination_number, language, instructions}` a `POST /outbound/requests` e si aspetta `{id: UUID, status: "pending_approval"}`. Il contratto è esercitato con un servizio simulato nei test; il collaudo reale di preparazione richiede la credenziale originale esatta. L’approvazione usa il secret separato e `POST /outbound/requests/{id}/approve`; è raggiungibile soltanto con configurazione completa e firma del proprietario verificata.
 
 Per ispezionare lo schema usare esclusivamente query di lettura:
 
@@ -109,4 +97,4 @@ I tool outbound richiedono ora un challenge HTTP `403 insufficient_scope`, compl
 
 La riconnessione dalla chat è stata corretta anche nel percorso di refresh automatico: [causa riprodotta, correzione e consenso richiesto](docs/oauth-reconnect-diagnosis.md). Per questo rilascio sono necessari Auth e MCP, in quest’ordine; non il Worker telefonico.
 
-Per l’intervento corrente di sola creazione si distribuisce **soltanto MCP** (`npm run deploy:mcp`): [procedura e protezioni](docs/creation-only.md). L’ordine Auth → MCP descritto sopra riguarda il precedente aggiornamento OAuth.
+Per l’intervento corrente con firma del proprietario si distribuisce **soltanto MCP** (`npm run deploy:mcp`): [procedura e protezioni](docs/outbound-execution.md). L’ordine Auth → MCP descritto sopra riguarda il precedente aggiornamento OAuth.

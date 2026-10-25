@@ -4,3 +4,6 @@ dist/
 .dev.vars*
 .env*
 !.env.example
+
+# Owner keys must never enter the repository.
+owner-signing-key*

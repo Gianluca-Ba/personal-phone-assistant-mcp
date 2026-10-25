@@ -34,8 +34,12 @@ if (
   );
 if (auth.vars.OWNER_TOKEN_VERSION !== mcp.vars.OWNER_TOKEN_VERSION)
   fail("OWNER_TOKEN_VERSION must match in both Worker configs.");
-if (mcp.vars.OUTBOUND_EXECUTION_ENABLED !== "false")
-  fail("Creation-only release: outbound execution must remain disabled.");
+if (
+  !["false", "true"].includes(mcp.vars.OUTBOUND_EXECUTION_ENABLED) ||
+  (mcp.vars.OUTBOUND_EXECUTION_ENABLED === "true" &&
+    mcp.vars.OUTBOUND_CONSENT_MODE !== "owner-ed25519-v1")
+)
+  fail("Execution requires the reviewed owner-ed25519-v1 consent verifier.");
 if (
   mcp.vars.OUTBOUND_ENABLED === "true" &&
   (mcp.vars.OUTBOUND_CONTRACT_VERIFIED !== "true" ||

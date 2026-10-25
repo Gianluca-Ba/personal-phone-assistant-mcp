@@ -1,3 +1,5 @@
+> Documento storico della fase di sola creazione. Il flusso successivo con firma del proprietario è descritto in [outbound-execution.md](outbound-execution.md).
+
 # Primo intervento: preparare richieste senza effettuare telefonate
 
 Questa fase abilita soltanto la creazione di richieste `pending_approval`. `approve_outbound_request` non può avviare telefonate: `OUTBOUND_EXECUTION_ENABLED=false` viene controllato prima delle letture di approvazione e di qualunque invio, e il preflight di deployment rifiuta un valore diverso. Il controllo `verifiedNativeConsent()` resta inoltre invariato e chiuso nel codice di produzione.

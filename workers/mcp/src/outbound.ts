@@ -1,3 +1,4 @@
+import { verifyOwnerSignature } from "./consent";
 import { DurableObject } from "cloudflare:workers";
 import { z } from "zod";
 const number = z.string().regex(/^\+[1-9]\d{7,14}$/);
@@ -45,6 +46,10 @@ export const approveInput = z
     instructions: z.string().min(1).max(10020),
     request_digest: z.string().regex(/^[a-f0-9]{64}$/),
     approval_nonce: z.string().uuid(),
+    consent_signature: z
+      .string()
+      .regex(/^ppa1\.[A-Za-z0-9_-]{86}$/)
+      .optional(),
   })
   .strict();
 export interface Principal {
@@ -60,6 +65,8 @@ export interface OutboundEnv {
   OWNER_TOKEN_VERSION: string;
   OUTBOUND_ENABLED?: string;
   OUTBOUND_EXECUTION_ENABLED?: string;
+  OUTBOUND_CONSENT_MODE?: string;
+  OUTBOUND_CONSENT_PUBLIC_KEY?: string;
   OUTBOUND_CONTRACT_VERIFIED?: string;
   OUTBOUND_API_SECRET?: string;
   OUTBOUND_APPROVAL_SECRET?: string;
@@ -67,7 +74,10 @@ export interface OutboundEnv {
   OUTBOUND_ALLOWED_DESTINATIONS_SECRET?: string;
   OUTBOUND_RATE_LIMIT_PER_HOUR?: string;
 }
-export type Snapshot = z.infer<typeof approveInput> & {
+export type Snapshot = Omit<
+  z.infer<typeof approveInput>,
+  "consent_signature"
+> & {
   owner: string;
   clientId: string;
   created_at: number;
@@ -348,8 +358,15 @@ export class OutboundGate extends DurableObject<OutboundEnv> {
       row.instructions !== s.instructions
     )
       fail("REQUEST_CHANGED");
-    await this.quota(p, "approve");
-    const consent = await this.verifiedNativeConsent(s, p);
+    const consent =
+      (await this.verifiedNativeConsent(s, p)) ??
+      (this.env.OUTBOUND_CONSENT_MODE === "owner-ed25519-v1"
+        ? await verifyOwnerSignature(
+            s,
+            input.consent_signature,
+            this.env.OUTBOUND_CONSENT_PUBLIC_KEY,
+          )
+        : null);
     if (!consent) {
       await this.audit("TRUSTED_CONFIRMATION_UNAVAILABLE");
       fail("TRUSTED_CONFIRMATION_UNAVAILABLE");
@@ -367,6 +384,7 @@ export class OutboundGate extends DurableObject<OutboundEnv> {
       this.env.OUTBOUND_APPROVAL_SECRET === this.env.OUTBOUND_API_SECRET
     )
       fail("SEPARATE_APPROVAL_CREDENTIAL_REQUIRED");
+    await this.quota(p, "approve");
     await this.ctx.storage.transaction(async (storage) => {
       const current = await storage.get<Snapshot>("snapshot");
       if (
@@ -397,6 +415,15 @@ export class OutboundGate extends DurableObject<OutboundEnv> {
         },
       );
       if (!response.ok) throw new Error("upstream");
+      const accepted = z
+        .object({
+          id: z.string().uuid(),
+          status: z.literal("dialing"),
+          destination_number: number,
+        })
+        .parse(await response.json());
+      if (accepted.id !== s.id || accepted.destination_number !== s.destination)
+        throw new Error("upstream mismatch");
       await this.ctx.storage.put("execution", { id: s.id, state: "submitted" });
       await this.ctx.storage.put("snapshot", {
         ...s,
@@ -427,9 +454,40 @@ export class OutboundGate extends DurableObject<OutboundEnv> {
     if (!s) return { state: "unmanaged" };
     if (s.owner !== p.userId || s.clientId !== p.clientId)
       fail("REQUEST_OWNER_MISMATCH");
+    const row = await this.env.DB.withSession("first-primary")
+      .prepare(
+        "SELECT status,telnyx_call_id,answered_at,completed_at,duration_seconds,last_error FROM outbound_requests WHERE id=?",
+      )
+      .bind(s.id)
+      .first<{
+        status: string;
+        telnyx_call_id: string | null;
+        answered_at: string | null;
+        completed_at: string | null;
+        duration_seconds: number | null;
+        last_error: string | null;
+      }>();
+    const terminal = row?.status === "completed" || row?.status === "failed";
+    const state = terminal
+      ? row.status
+      : row?.status === "dialing"
+        ? row.telnyx_call_id || row.answered_at
+          ? "calling"
+          : row.last_error || s.state === "unknown"
+            ? "unknown"
+            : "submitted"
+        : s.state === "pending_approval" && s.expires_at <= Date.now()
+          ? "expired"
+          : s.state;
     return {
       id: s.id,
-      state: s.state,
+      state,
+      control_state: s.state,
+      phone_state: row?.status ?? "missing",
+      answered_at: row?.answered_at ?? null,
+      completed_at: row?.completed_at ?? null,
+      duration_seconds: row?.duration_seconds ?? null,
+      last_error: row?.last_error ?? null,
       created_at: s.created_at,
       expires_at: s.expires_at,
       attempted_at: s.attempted_at,

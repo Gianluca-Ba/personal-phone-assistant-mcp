@@ -61,18 +61,29 @@ export default {
         .bind("approve")
         .run();
       const row = await env.DB.prepare(
-        "SELECT instructions FROM outbound_requests WHERE id=?",
+        "SELECT instructions,destination_number FROM outbound_requests WHERE id=?",
       )
         .bind(id)
-        .first<{ instructions: string }>();
+        .first<{ instructions: string; destination_number: string }>();
       if (row?.instructions.includes("SIMULATE_UNKNOWN"))
         return new Response("Unknown", { status: 503 });
       await env.DB.prepare(
-        "UPDATE outbound_requests SET status='initiated' WHERE id=? AND status='pending_approval'",
+        "UPDATE outbound_requests SET status='dialing' WHERE id=? AND status='pending_approval'",
       )
         .bind(id)
         .run();
-      return Response.json({ status: "initiated" });
+      if (row?.instructions.includes("SIMULATE_DISPATCH_UNKNOWN")) {
+        await env.DB.prepare(
+          "UPDATE outbound_requests SET last_error='fetch_failed' WHERE id=?",
+        )
+          .bind(id)
+          .run();
+        return Response.json({ status: "dispatch_unknown" }, { status: 202 });
+      }
+      return Response.json(
+        { id, status: "dialing", destination_number: row?.destination_number },
+        { status: 202 },
+      );
     }
     return new Response("Not found", { status: 404 });
   },

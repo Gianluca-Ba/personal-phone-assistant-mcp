@@ -1,3 +1,4 @@
+import { generateKeyPairSync, sign } from "node:crypto";
 import { beforeAll, afterAll, expect, it } from "vitest";
 import { createTestHarness } from "wrangler";
 import { parse } from "jsonc-parser";
@@ -11,6 +12,11 @@ import type { OutboundGate as FixtureGate } from "./mcp-consent-fixture";
 import { login } from "./support";
 const secret = "test-owner-secret-32-characters-minimum";
 const base = parse(readFileSync("workers/mcp/wrangler.jsonc", "utf8"));
+const ownerKey = generateKeyPairSync("ed25519");
+const ownerPublicKey = ownerKey.publicKey
+  .export({ type: "spki", format: "der" })
+  .subarray(-32)
+  .toString("base64url");
 const vars = {
   ...base.vars,
   SCHEMA_MAPPING: "",
@@ -19,6 +25,7 @@ const vars = {
   OUTBOUND_CONTRACT_VERIFIED: "true",
   OUTBOUND_ALLOWED_DESTINATIONS: '["+819012345678"]',
   OUTBOUND_RATE_LIMIT_PER_HOUR: "100",
+  OUTBOUND_CONSENT_PUBLIC_KEY: ownerPublicKey,
   OUTBOUND_API_SECRET: "test-create",
   OUTBOUND_APPROVAL_SECRET: "test-approve",
 };
@@ -171,7 +178,7 @@ beforeAll(async () => {
   // Test-only secrets: no real API is reachable from this harness.
   // Inline config secret values are vars here and stay exclusively in this local runtime.
   await env.DB.exec(
-    "CREATE TABLE outbound_requests (id TEXT PRIMARY KEY,destination_number TEXT,instructions TEXT,language TEXT,status TEXT,created_at TEXT,authorized_at TEXT,telnyx_call_id TEXT); CREATE TABLE mock_events (operation TEXT);",
+    "CREATE TABLE outbound_requests (id TEXT PRIMARY KEY,destination_number TEXT,instructions TEXT,language TEXT,status TEXT,created_at TEXT,authorized_at TEXT,telnyx_call_id TEXT,answered_at TEXT,completed_at TEXT,duration_seconds INTEGER,last_error TEXT); CREATE TABLE mock_events (operation TEXT);",
   );
 }, 60000);
 afterAll(() => harness.close());
@@ -758,4 +765,153 @@ it("a known pre-insert 401 can be corrected and retried with the SAME key withou
   expect(await g.create(details, actor)).toMatchObject({ id: s.id });
   expect((await stats()).create - (before.create ?? 0)).toBe(1);
   expect((await stats()).approve ?? 0).toBe(before.approve ?? 0);
+});
+
+// Production verifier, with a throwaway local key. No trusted-host fixture override.
+async function realRequest() {
+  const details = input();
+  const s = (await stub(
+    `create:owner:test-client:${details.request_key}`,
+    "real",
+  ).create(details, actor)) as Snapshot;
+  return { s, g: stub(`approval:${s.id}`, "real") };
+}
+async function ownerReceipt(s: Snapshot) {
+  // Use the exact owner-operated helper, not a test copy of serialization.
+  const { spawnSync } = await import("node:child_process");
+  const out = spawnSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      "import {consentPayload} from './scripts/owner-consent.mjs'; process.stdout.write(consentPayload(JSON.parse(process.argv[1])));",
+      JSON.stringify(s),
+    ],
+    { encoding: "utf8" },
+  );
+  expect(out.status).toBe(0);
+  return (
+    "ppa1." +
+    sign(null, Buffer.from(out.stdout), ownerKey.privateKey).toString(
+      "base64url",
+    )
+  );
+}
+it("production owner signature submits exactly once under concurrency and rejects replay", async () => {
+  const { s, g } = await realRequest();
+  const signature = await ownerReceipt(s);
+  const before = await stats();
+  const attempts = await Promise.allSettled([
+    g.approve({ ...approve(s), consent_signature: signature }, actor),
+    g.approve({ ...approve(s), consent_signature: signature }, actor),
+  ]);
+  expect(attempts.filter((v) => v.status === "fulfilled")).toHaveLength(1);
+  expect((await stats()).approve - (before.approve ?? 0)).toBe(1);
+  await expect(
+    g.approve({ ...approve(s), consent_signature: signature }, actor),
+  ).rejects.toThrow("ALREADY_SUBMITTED_OR_UNKNOWN");
+});
+it("owner signatures reject altered payloads, another request, foreign keys and unsupported model claims", async () => {
+  const { s, g } = await realRequest();
+  const before = await stats();
+  for (const modified of [
+    { ...s, destination: "+819099999999" },
+    { ...s, instructions: s.instructions + " changed" },
+    { ...s, language: "it" as const },
+    { ...s, approval_nonce: crypto.randomUUID() },
+    { ...s, request_digest: "0".repeat(64) },
+    { ...s, expires_at: s.expires_at + 1 },
+    { ...s, clientId: "other" },
+    { ...s, owner: "other" },
+    { ...s, id: crypto.randomUUID() },
+  ]) {
+    await expect(
+      g.approve(
+        { ...approve(s), consent_signature: await ownerReceipt(modified) },
+        actor,
+      ),
+    ).rejects.toThrow("TRUSTED_CONFIRMATION_UNAVAILABLE");
+  }
+  const other = await realRequest();
+  await expect(
+    other.g.approve(
+      { ...approve(other.s), consent_signature: await ownerReceipt(s) },
+      actor,
+    ),
+  ).rejects.toThrow("TRUSTED_CONFIRMATION_UNAVAILABLE");
+  const foreign = generateKeyPairSync("ed25519");
+  const bad =
+    "ppa1." +
+    sign(null, Buffer.from("forged consent"), foreign.privateKey).toString(
+      "base64url",
+    );
+  await expect(
+    g.approve({ ...approve(s), consent_signature: bad }, actor),
+  ).rejects.toThrow("TRUSTED_CONFIRMATION_UNAVAILABLE");
+  expect((await stats()).approve ?? 0).toBe(before.approve ?? 0);
+});
+it("status reconciles submitted, calling and terminal states from D1 without exposing callback credentials", async () => {
+  const { s, g } = await realRequest();
+  await g.approve(
+    { ...approve(s), consent_signature: await ownerReceipt(s) },
+    actor,
+  );
+  await env.DB.prepare(
+    "UPDATE outbound_requests SET status='dialing',telnyx_call_id=NULL WHERE id=?",
+  )
+    .bind(s.id)
+    .run();
+  expect(await g.status(actor)).toMatchObject({
+    state: "submitted",
+    phone_state: "dialing",
+    control_state: "submitted",
+  });
+  await env.DB.prepare(
+    "UPDATE outbound_requests SET telnyx_call_id='local-test',answered_at=CURRENT_TIMESTAMP WHERE id=?",
+  )
+    .bind(s.id)
+    .run();
+  expect(await g.status(actor)).toMatchObject({ state: "calling" });
+  for (const terminal of ["completed", "failed"]) {
+    await env.DB.prepare(
+      "UPDATE outbound_requests SET status=?,duration_seconds=12,completed_at=CURRENT_TIMESTAMP WHERE id=?",
+    )
+      .bind(terminal, s.id)
+      .run();
+    const status = await g.status(actor);
+    expect(status).toMatchObject({ state: terminal, duration_seconds: 12 });
+    expect(JSON.stringify(status)).not.toMatch(
+      /callback_token|consent_signature/,
+    );
+  }
+});
+
+it("a 202 dispatch_unknown response stays unknown and cannot be resubmitted", async () => {
+  const details = {
+    ...input(),
+    instructions: "SIMULATE_DISPATCH_UNKNOWN: test only",
+  };
+  const s = (await stub(
+    `create:owner:test-client:${details.request_key}`,
+    "real",
+  ).create(details, actor)) as Snapshot;
+  const g = stub(`approval:${s.id}`, "real"),
+    before = await stats();
+  await expect(
+    g.approve(
+      { ...approve(s), consent_signature: await ownerReceipt(s) },
+      actor,
+    ),
+  ).rejects.toThrow("APPROVAL_OUTCOME_UNKNOWN_DO_NOT_RETRY");
+  expect(await g.status(actor)).toMatchObject({
+    state: "unknown",
+    phone_state: "dialing",
+  });
+  await expect(
+    g.approve(
+      { ...approve(s), consent_signature: await ownerReceipt(s) },
+      actor,
+    ),
+  ).rejects.toThrow("ALREADY_SUBMITTED_OR_UNKNOWN");
+  expect((await stats()).approve - (before.approve ?? 0)).toBe(1);
 });

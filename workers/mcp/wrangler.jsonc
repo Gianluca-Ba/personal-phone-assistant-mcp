@@ -29,6 +29,7 @@
     "SCHEMA_MAPPING": "{\"calls\":{\"id\":\"id\",\"phone\":\"caller_number\",\"destination\":\"destination_number\",\"time\":\"created_at\",\"time_format\":\"iso\"},\"call_summaries\":{\"call\":\"call_id\",\"summary\":\"summary_it\",\"actions\":\"action_required\"},\"outbound_requests\":{\"phone\":\"destination_number\",\"time\":\"created_at\",\"time_format\":\"iso\"}}",
     "OUTBOUND_RATE_LIMIT_PER_HOUR": "5",
     "OUTBOUND_EXECUTION_ENABLED": "false",
+    "OUTBOUND_CONSENT_MODE": "owner-ed25519-v1",
     "OUTBOUND_PRIVATE_ALLOWLIST_CONFIGURED": "true",
   },
   "durable_objects": {
