@@ -112,7 +112,7 @@ export default {
         "https://api.telnyx.com/v2/ai/conversations/" + encodeURIComponent(cid),
         {
           headers: { Authorization: "Bearer " + env.TELNYX_API_KEY },
-          redirect: "error",
+          redirect: "manual",
           signal: AbortSignal.timeout(5000),
         },
       );
@@ -244,8 +244,32 @@ export class VoiceSession {
         }, 1000);
       });
       return new Response(null, { status: 101, webSocket: client });
-    } catch {
-      return reply({ error: "Voice operation unavailable" }, 503);
+    } catch (error) {
+      const stage = [
+        "assistant_configuration",
+        "provider_connections",
+        "voice_session_ready",
+        "complete",
+      ].includes(this.bridge.preflightStage)
+        ? this.bridge.preflightStage
+        : "request_validation";
+      // Only fixed categories: never log bodies, URLs, phone numbers, IDs or credentials.
+      const category = ["TypeError", "TimeoutError", "AbortError"].includes(
+        error?.name,
+      )
+        ? error.name
+        : "Error";
+      console.warn(
+        JSON.stringify({ event: "voice_operation_failed", stage, category }),
+      );
+      return reply(
+        {
+          error: "Voice operation unavailable",
+          code: "VOICE_OPERATION_FAILED",
+          stage,
+        },
+        503,
+      );
     }
   }
 }

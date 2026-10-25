@@ -2,10 +2,12 @@
 
 ## Production deployment
 
+**Subsequent incident:** the first real attempt exposed an unsupported Cloudflare redirect mode during controller warmup. It was reproduced, corrected and tested in Cloudflare without dialing. See [incident and repair](voice-controller-unavailable-2026-10-25.md). The original virtual tests below did not establish production initialization.
+
 The dedicated Japanese outbound path is deployed. No real phone calls were made during development or validation. PSTN tone delivery, remote menu acceptance, real acoustic echo and real-world latency still require an explicitly approved pilot.
 
 - Phone Worker `personal-phone-assistant`: `59608ee5-b091-4076-858a-e9f6d43274a0`.
-- New controller Worker `personal-phone-assistant-voice`: `7f736e00-08fe-4197-bc79-f766788ef543` (initial deployment `ed13caaf-ea3d-476c-8ca8-7ef68897b38a`); health ready, `pstn_pilot_verified=false`.
+- New controller Worker `personal-phone-assistant-voice`: `5c09f7df-4dd3-4957-807d-028ee8ff6ed6` (redirect compatibility repair; prior version `7f736e00-08fe-4197-bc79-f766788ef543`; initial deployment `ed13caaf-ea3d-476c-8ca8-7ef68897b38a`); health ready, `pstn_pilot_verified=false`.
 - Dedicated outbound assistant: `assistant-101aabf8-c364-4913-8e6f-05eaee622662`, initial version `20261025T054758636339`; tone refinement version `20261025T055500676986`.
 - New Call Control application `3078297013335361153`, active, one outbound channel. Existing voice profile reused without changing its settings. No phone numbers reassigned.
 - Separate outbound insight group; existing insight definitions reused, existing inbound group unchanged. Authenticated summaries are forwarded to the existing phone summary handler only after binding a real call.

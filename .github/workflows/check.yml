@@ -15,5 +15,6 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run test:phone-voice
+      - run: npm run test:voice-edge
       - run: npm run build
       - run: npm audit --omit=dev

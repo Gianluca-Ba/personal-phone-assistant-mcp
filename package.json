@@ -18,7 +18,8 @@
     "deploy:bootstrap": "node scripts/bootstrap.mjs",
     "format": "prettier --write workers tests scripts *.json .github/workflows/*.yml README.md",
     "smoke:live": "node scripts/smoke-live.mjs",
-    "test:phone-voice": "node scripts/verify-phone-voice.mjs"
+    "test:phone-voice": "node scripts/verify-phone-voice.mjs",
+    "test:voice-edge": "node scripts/test-voice-edge.mjs"
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "1.2.4",

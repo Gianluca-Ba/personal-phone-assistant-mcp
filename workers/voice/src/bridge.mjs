@@ -89,12 +89,14 @@ export class VoiceBridge {
       await this.persist();
     }
     if (this.env.PREWARM_BEFORE_DIAL === "true") {
+      this.preflightStage = "assistant_configuration";
       const r = await this.providerFetch(
         "https://api.telnyx.com/v2/ai/assistants/" +
           encodeURIComponent(this.env.OUTBOUND_ASSISTANT_ID),
         {
           headers: { Authorization: "Bearer " + this.env.TELNYX_API_KEY },
-          redirect: "error",
+          // Workers rejects redirect:"error"; manual also keeps credentials on this origin.
+          redirect: "manual",
           signal: AbortSignal.timeout(5000),
         },
       );
@@ -108,10 +110,12 @@ export class VoiceBridge {
       )
         throw Error("Assistant configuration drift");
       try {
+        this.preflightStage = "provider_connections";
         await Promise.all([
           this.openVoice(),
           ...(this.env.EXTERNAL_STT === "true" ? [this.openStt()] : []),
         ]);
+        this.preflightStage = "voice_session_ready";
         await Promise.race([
           this.voiceReadyPromise,
           new Promise((_, reject) =>
@@ -124,6 +128,7 @@ export class VoiceBridge {
         this.cleanup();
         throw error;
       }
+      this.preflightStage = "complete";
       this.orphanTimer = setTimeout(() => {
         if (!this.context.call_id) {
           this.ended = true;
@@ -218,7 +223,7 @@ export class VoiceBridge {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({ ...body, command_id }),
-          redirect: "error",
+          redirect: "manual",
           signal: AbortSignal.timeout(10000),
         },
       );
@@ -274,7 +279,7 @@ export class VoiceBridge {
                 : "voice_assistant",
           },
         }),
-        redirect: "error",
+        redirect: "manual",
         signal: AbortSignal.timeout(10000),
       },
     );
@@ -356,7 +361,7 @@ export class VoiceBridge {
           Upgrade: "websocket",
           Authorization: "Bearer " + this.env.TELNYX_API_KEY,
         },
-        redirect: "error",
+        redirect: "manual",
         signal: AbortSignal.timeout(10000),
       },
     );
@@ -478,7 +483,7 @@ export class VoiceBridge {
           Upgrade: "websocket",
           Authorization: "Bearer " + this.env.TELNYX_API_KEY,
         },
-        redirect: "error",
+        redirect: "manual",
         signal: AbortSignal.timeout(10000),
       },
     );
@@ -974,7 +979,7 @@ export class VoiceBridge {
           encodeURIComponent(this.context.call_id),
         {
           headers: { Authorization: "Bearer " + this.env.TELNYX_API_KEY },
-          redirect: "error",
+          redirect: "manual",
           signal: AbortSignal.timeout(5000),
         },
       );
