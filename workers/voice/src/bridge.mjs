@@ -400,6 +400,8 @@ export class VoiceBridge {
   cancelOutput() {
     if (this.cancelledForTurn) return;
     this.cancelledForTurn = true;
+    const previous = this.responses.get(this.controller.responseId);
+    if (previous) previous.suppressed = true;
     if (
       this.context.controlled_closing &&
       !this.context.controlled_closing.cancelled
@@ -698,6 +700,10 @@ export class VoiceBridge {
         bytes: 0,
         rendered: 0,
         suppressed:
+          this.controller?.menu?.complete ||
+          /暗証|認証コード|パスワード|本人確認|PIN|OTP/i.test(
+            this.controller?.inputText ?? "",
+          ) ||
           (this.context.controlled_closing &&
             !this.context.controlled_closing.cancelled) ||
           (this.context.controlled_close_requested &&
@@ -762,6 +768,7 @@ export class VoiceBridge {
     } else if (frame.type === "response.done") {
       const response = this.responses.get(id);
       if (frame.response?.status === "cancelled") {
+        if (id !== this.controller.responseId) return;
         this.marks.clear((m) => this.sendMedia(m));
         this.controller.event({ type: "response.cancelled" });
         this.encoder = new MuLawEncoder(this.outputRate);

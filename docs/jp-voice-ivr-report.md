@@ -5,8 +5,8 @@
 The dedicated Japanese outbound path is deployed. No real phone calls were made during development or validation. PSTN tone delivery, remote menu acceptance, real acoustic echo and real-world latency still require an explicitly approved pilot.
 
 - Phone Worker `personal-phone-assistant`: `59608ee5-b091-4076-858a-e9f6d43274a0`.
-- New controller Worker `personal-phone-assistant-voice`: `ed13caaf-ea3d-476c-8ca8-7ef68897b38a`; health ready, `pstn_pilot_verified=false`.
-- Dedicated outbound assistant: `assistant-101aabf8-c364-4913-8e6f-05eaee622662`, initial version `20261025T054758636339`.
+- New controller Worker `personal-phone-assistant-voice`: `7f736e00-08fe-4197-bc79-f766788ef543` (initial deployment `ed13caaf-ea3d-476c-8ca8-7ef68897b38a`); health ready, `pstn_pilot_verified=false`.
+- Dedicated outbound assistant: `assistant-101aabf8-c364-4913-8e6f-05eaee622662`, initial version `20261025T054758636339`; tone refinement version `20261025T055500676986`.
 - New Call Control application `3078297013335361153`, active, one outbound channel. Existing voice profile reused without changing its settings. No phone numbers reassigned.
 - Separate outbound insight group; existing insight definitions reused, existing inbound group unchanged. Authenticated summaries are forwarded to the existing phone summary handler only after binding a real call.
 - MCP/Auth unchanged. OAuth scopes, immutable request, explicit conversational approval policy, expiry, anti-replay, destination policy, idempotency and rate limits unchanged. Conversational approval is not independently cryptographically attested by the backend.
@@ -42,7 +42,7 @@ A task outcome and a call ending are distinct. Closing waits for the recipient's
 
 ## Reproducible results
 
-90 automated tests passed, including concurrent duplicate commands, changed command bodies, one-use media claims, signed context, duplicate callbacks, actual playback gating and cancelled farewell callbacks. Both legacy (24) and guarded (29) offline phone-contract checks passed with network blocked and zero production writes. Type checking, three Worker dry builds and production dependency audit passed (zero vulnerabilities).
+92 automated tests passed, including concurrent duplicate commands, changed command bodies, one-use media claims, signed context, duplicate callbacks, actual playback gating and cancelled farewell callbacks. Both legacy (24) and guarded (29) offline phone-contract checks passed with network blocked and zero production writes. Type checking, three Worker dry builds and production dependency audit passed (zero vulnerabilities).
 
 Six final virtual scenarios used real Telnyx AI and STT WebSockets with synthetic Japanese speech. The phone leg, DTMF, Speak, playback acknowledgements and hangup were mocked; no dial API was reachable. All six passed. Sanitized results: `voice/jp/bridge-results-2026-10-25.json`.
 
@@ -62,6 +62,14 @@ Earlier native voice comparisons (16 virtual sessions) measured PCM-end-to-next-
 ## Tone and task separation
 
 `voice/jp/guarded-outbound-prompt.txt` is permanent outbound-only policy. Only `outbound_task` carries per-call instructions. It requires short natural telephone Japanese, one question at a time, no repetitive confirmations, 18時/午後6時 rather than 午後18時, no volunteered owner name, and truthful disclosure of automation if asked. No inbound greeting is inherited. Recipient/IVR content cannot expand the owner's task or authorize fees, payments or booking changes.
+
+## Published tone refinement
+
+After the initial DTMF deployment, an isolated assistant tested a more natural polite register, less ceremonial phrasing, no spoken internal-action narration, and explicit system-owned farewell. Sensitive menus now instruct immediate inability-to-proceed rather than asking a recording for credentials. The dedicated production assistant received only the validated instruction change; its model, voice, tool schemas and original inbound assistant stayed unchanged. A read-only D1 check found no recent active outbound call before the update.
+
+Four voice regression scenarios passed (single menu, PIN refusal, aizuchi and genuine interruption), followed by two fresh IVR/PIN runs after enforcing inaudible keypad narration in code. PIN refusal took 20.2 seconds and 21.9 seconds versus the earlier 54.5 seconds; the single-menu run remained around 21–22 seconds. These are tiny synthetic end-to-end samples, not a claimed model/PSTN latency improvement. Aizuchi caused zero cancellations; the actual wait request caused one cancellation. See `voice/jp/tone-results-2026-10-25.json`.
+
+Two additional automated regressions ensure that late audio from a cancelled response is dropped and its late cancellation cannot clear the next response, and that generated IVR narration never reaches the media output while a complete menu is current. All 92 tests pass. GitHub CI for initial deployment commit `e7de22f` passed. The final deployment rejects unauthenticated registration (401), unsigned webhooks (403) and unsigned media upgrades (403); public health is 200/ready. No actual calls were initiated.
 
 ## Reproduction and rollback
 

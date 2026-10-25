@@ -473,3 +473,74 @@ it("hangs up once only after the controlled farewell has actually completed", as
     f.network.filter((n) => n.url.endsWith("/actions/hangup")),
   ).toHaveLength(1);
 });
+it("drops late audio from a cancelled response without clearing a newer response", async () => {
+  const f = fixture();
+  await f.register();
+  const media = new Socket();
+  await f.b.attachMedia(media);
+  await f.b.bindCall("bound-call");
+  f.b.streamId = "stream";
+  await f.b.onVoice({
+    type: "session.created",
+    session: {
+      conversation_id: "isolated",
+      audio: {
+        input: { format: { rate: 8000 } },
+        output: { format: { rate: 8000 } },
+      },
+    },
+  });
+  await f.b.onVoice({ type: "response.created", response: { id: "old" } });
+  f.b.cancelOutput();
+  const before = media.frames.length;
+  await f.b.onVoice({
+    type: "response.output_audio.delta",
+    response_id: "old",
+    delta: Buffer.alloc(320).toString("base64"),
+  });
+  expect(media.frames.length).toBe(before);
+  await f.b.onVoice({ type: "response.created", response: { id: "new" } });
+  await f.b.onVoice({
+    type: "response.output_audio.delta",
+    response_id: "new",
+    delta: Buffer.alloc(320).toString("base64"),
+  });
+  const clears = media.frames.filter((m) => m.event === "clear").length;
+  await f.b.onVoice({
+    type: "response.done",
+    response: { id: "old", status: "cancelled" },
+  });
+  expect(media.frames.filter((m) => m.event === "clear").length).toBe(clears);
+  expect(f.b.controller.responseActive).toBe(true);
+});
+it("keeps generated keypad narration inaudible while a completed IVR menu is current", async () => {
+  const f = fixture();
+  await f.register();
+  const media = new Socket();
+  await f.b.attachMedia(media);
+  await f.b.bindCall("bound-call");
+  await f.b.onVoice({
+    type: "session.created",
+    session: {
+      conversation_id: "isolated",
+      audio: {
+        input: { format: { rate: 8000 } },
+        output: { format: { rate: 8000 } },
+      },
+    },
+  });
+  f.b.controller.event({
+    type: "conversation.item.input_audio_transcription.completed",
+    transcript: "予約の変更は2番を押してください。",
+  });
+  await f.b.onVoice({
+    type: "response.created",
+    response: { id: "menu-narration" },
+  });
+  await f.b.onVoice({
+    type: "response.output_audio.delta",
+    response_id: "menu-narration",
+    delta: Buffer.alloc(3200).toString("base64"),
+  });
+  expect(media.frames.some((m) => m.event === "media")).toBe(false);
+});

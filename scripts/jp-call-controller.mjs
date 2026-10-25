@@ -1,5 +1,5 @@
 // Transport-independent action gate. State events must come from the authenticated
-// media adapter, never from model arguments. Current integration is virtual only.
+// media adapter, never from model arguments. Production uses signed Telnyx media.
 import { createHash, randomUUID } from "node:crypto";
 import { isBackchannel } from "./jp-backchannel.mjs";
 import { PlaybackClock } from "./jp-playback-clock.mjs";

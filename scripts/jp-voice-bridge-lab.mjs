@@ -195,7 +195,7 @@ for (const s of cases.filter((s) => selected.includes(s.id))) {
       });
     }
     const match =
-      /^\/v2\/calls\/offline-[a-f0-9-]+\/actions\/(send_dtmf|hangup|speak)$/.exec(
+      /^\/v2\/calls\/offline-[a-f0-9-]+\/actions\/(send_dtmf|hangup|speak|playback_stop)$/.exec(
         u.pathname,
       );
     if (match && method === "POST") {
