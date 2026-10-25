@@ -2,7 +2,7 @@
 
 Livello MCP/OAuth per l’assistente telefonico Telnyx già operativo. Il progetto non sostituisce né distribuisce `personal-phone-assistant`, non modifica Telnyx e non applica migrazioni alle tabelle D1 esistenti.
 
-**Stato attuale:** preparazione pending operativa e autorizzazione per singola chiamata implementata con firma Ed25519 del proprietario. Il consenso nativo ChatGPT non è una prova server verificabile: `verifiedNativeConsent()` resta chiuso. L’esecuzione rimane disabilitata finché chiave pubblica e Secret separato di approvazione non sono configurati. [Flusso, configurazione e collaudo](docs/outbound-execution.md).
+**Stato attuale:** preparazione pending operativa e autorizzazione per singola chiamata implementata con firma Ed25519 del proprietario. Il consenso nativo ChatGPT non è una prova server verificabile: `verifiedNativeConsent()` resta chiuso. La chiave pubblica e il Secret separato di approvazione sono configurati: `OUTBOUND_EXECUTION_ENABLED=true` abilita l’invio solo con una firma valida per quella specifica richiesta. [Flusso, configurazione e collaudo](docs/outbound-execution.md).
 
 Endpoint: `https://personal-phone-assistant-mcp.barsaglini-gianluca.workers.dev/mcp`.
 
@@ -45,7 +45,7 @@ Il test sintetico di un adattatore nativo futuro è implementato **solo** in `te
 
 ## Configurazione attuale
 
-I due file Wrangler contengono gli ID già verificati del namespace `personal-phone-assistant-oauth-kv` e del database `phone-assistant-db` e i binding esistenti. Preview URL e osservabilità dei log sono disabilitate. `OUTBOUND_ENABLED=true` e `OUTBOUND_CONTRACT_VERIFIED=true` abilitano la sola preparazione. `OUTBOUND_EXECUTION_ENABLED=false` impedisce l’approvazione; può diventare true soltanto con il verificatore firmato e la configurazione del proprietario completa. La variabile pubblica della allowlist resta vuota; il numero autorizzato è nel Secret `OUTBOUND_ALLOWED_DESTINATIONS_SECRET`.
+I due file Wrangler contengono gli ID già verificati del namespace `personal-phone-assistant-oauth-kv` e del database `phone-assistant-db` e i binding esistenti. Preview URL e osservabilità dei log sono disabilitate. `OUTBOUND_ENABLED=true` e `OUTBOUND_CONTRACT_VERIFIED=true` abilitano la sola preparazione. `OUTBOUND_EXECUTION_ENABLED=true` abilita il percorso di approvazione con il verificatore firmato e la configurazione del proprietario completa. Impostare false per disabilitare immediatamente gli invii. La variabile pubblica della allowlist resta vuota; il numero autorizzato è nel Secret `OUTBOUND_ALLOWED_DESTINATIONS_SECRET`.
 
 `SCHEMA_MAPPING` usa `calls.caller_number`, `calls.destination_number`, `calls.created_at`, `call_summaries.summary_it`, `call_summaries.action_required` e `outbound_requests.destination_number`. La data usata per filtri e ordinamento è `created_at` perché le chiamate esistenti avevano `started_at` nullo. Le query selezionano solo colonne realmente presenti tramite `PRAGMA table_info`; i callback token non vengono selezionati.
 
