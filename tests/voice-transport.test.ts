@@ -544,3 +544,71 @@ it("keeps generated keypad narration inaudible while a completed IVR menu is cur
   });
   expect(media.frames.some((m) => m.event === "media")).toBe(false);
 });
+it("protects registration diagnostics and keeps active preflight probes disabled by default", async () => {
+  const f = fixture();
+  f.env.VOICE_SESSIONS = {
+    idFromName: () => {
+      throw Error("Unauthorized access");
+    },
+  };
+  expect(
+    (
+      await worker.fetch(
+        new Request("https://voice.example/diagnostics/registration/" + rid),
+        f.env,
+      )
+    ).status,
+  ).toBe(401);
+  expect(
+    (
+      await worker.fetch(
+        new Request("https://voice.example/diagnostics/preflight", {
+          method: "POST",
+        }),
+        f.env,
+      )
+    ).status,
+  ).toBe(404);
+  f.env.VOICE_DIAGNOSTICS_ENABLED = "true";
+  expect(
+    (
+      await worker.fetch(
+        new Request("https://voice.example/diagnostics/preflight", {
+          method: "POST",
+        }),
+        f.env,
+      )
+    ).status,
+  ).toBe(401);
+});
+it("returns only redacted registration metadata through authenticated diagnostics", async () => {
+  const { VoiceSession } = await import(
+    new URL("../workers/voice/src/index.mjs", import.meta.url).href
+  );
+  const f = fixture();
+  const session = new VoiceSession(
+    { storage: f.storage, waitUntil: () => {} },
+    f.env,
+  );
+  session.bridge.context = {
+    request_id: rid,
+    from: "+819011111111",
+    destination: "+819022222222",
+    instructions: "PRIVATE TASK",
+    callback_token: "PRIVATE TOKEN",
+    nonce: "PRIVATE NONCE",
+    failure: "voice_event_failed",
+  };
+  const r = await session.fetch(
+    new Request("https://voice.example/diagnostics/registration/" + rid, {
+      headers: { Authorization: "Bearer " + f.env.VOICE_CONTROL_API_SECRET },
+    }),
+  );
+  const b = await r.json();
+  expect(b.registered).toBe(true);
+  expect(b.failure).toBe("voice_event_failed");
+  expect(b.call_bound).toBe(false);
+  expect(JSON.stringify(b)).not.toMatch(
+    /PRIVATE|819011|819022|instructions|callback_token|nonce/,
+  );
+});

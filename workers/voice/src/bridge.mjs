@@ -25,7 +25,10 @@ export class VoiceBridge {
   constructor(
     storage,
     env,
-    { providerFetch = fetch, now = () => Date.now() } = {},
+    {
+      providerFetch = (input, init) => globalThis.fetch(input, init),
+      now = () => Date.now(),
+    } = {},
   ) {
     this.storage = storage;
     this.env = env;

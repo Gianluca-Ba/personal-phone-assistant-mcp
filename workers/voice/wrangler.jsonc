@@ -21,6 +21,7 @@
   ],
   "vars": {
     "VOICE_EXECUTION_ENABLED": "false",
+    "VOICE_DIAGNOSTICS_ENABLED": "false",
     "PSTN_PILOT_VERIFIED": "false",
     "VOICE_ORIGIN": "https://personal-phone-assistant-voice.barsaglini-gianluca.workers.dev",
     "OUTBOUND_ASSISTANT_ID": "",

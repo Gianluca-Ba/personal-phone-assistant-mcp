@@ -1,3 +1,4 @@
+import { probePreflight } from "./preflight-probe.mjs";
 import { VoiceBridge } from "./bridge.mjs";
 import {
   sameSecret,
@@ -31,6 +32,37 @@ export default {
         ready: ready(env),
         pstn_pilot_verified: env.PSTN_PILOT_VERIFIED === "true",
       });
+    if (
+      url.pathname === "/diagnostics/preflight" &&
+      request.method === "POST" &&
+      env.VOICE_DIAGNOSTICS_ENABLED === "true"
+    ) {
+      if (
+        !sameSecret(
+          request.headers.get("Authorization")?.replace(/^Bearer /, ""),
+          env.VOICE_CONTROL_API_SECRET,
+        )
+      )
+        return reply({ error: "Unauthorized" }, 401);
+      return env.VOICE_SESSIONS.get(
+        env.VOICE_SESSIONS.idFromName(crypto.randomUUID()),
+      ).fetch(request);
+    }
+    const diagnostic = /^\/diagnostics\/registration\/([a-f0-9-]{36})$/.exec(
+      url.pathname,
+    );
+    if (diagnostic && request.method === "GET") {
+      if (
+        !sameSecret(
+          request.headers.get("Authorization")?.replace(/^Bearer /, ""),
+          env.VOICE_CONTROL_API_SECRET,
+        )
+      )
+        return reply({ error: "Unauthorized" }, 401);
+      return env.VOICE_SESSIONS.get(
+        env.VOICE_SESSIONS.idFromName(diagnostic[1]),
+      ).fetch(request);
+    }
     if (url.pathname === "/register" && request.method === "POST") {
       if (
         !sameSecret(
@@ -161,6 +193,54 @@ export class VoiceSession {
   async fetch(request) {
     const url = new URL(request.url);
     try {
+      if (
+        url.pathname === "/diagnostics/preflight" &&
+        request.method === "POST" &&
+        this.env.VOICE_DIAGNOSTICS_ENABLED === "true"
+      ) {
+        if (
+          !sameSecret(
+            request.headers.get("Authorization")?.replace(/^Bearer /, ""),
+            this.env.VOICE_CONTROL_API_SECRET,
+          )
+        )
+          return reply({ error: "Unauthorized" }, 401);
+        return reply(
+          await probePreflight(
+            this.env,
+            this.state.storage,
+            /^[a-f0-9-]{36}$/.test(
+              request.headers.get("X-Inspection-Request") ?? "",
+            )
+              ? request.headers.get("X-Inspection-Request")
+              : null,
+          ),
+        );
+      }
+      if (
+        /^\/diagnostics\/registration\/[a-f0-9-]{36}$/.test(url.pathname) &&
+        request.method === "GET"
+      ) {
+        if (
+          !sameSecret(
+            request.headers.get("Authorization")?.replace(/^Bearer /, ""),
+            this.env.VOICE_CONTROL_API_SECRET,
+          )
+        )
+          return reply({ error: "Unauthorized" }, 401);
+        const ctx = await this.bridge.load();
+        return reply({
+          registered: !!ctx,
+          call_bound: !!ctx?.call_id,
+          conversation_created: !!ctx?.conversation_id,
+          failure: ctx?.failure ?? null,
+          stage: this.bridge.preflightStage ?? null,
+          stream_claimed: !!(await this.state.storage.get("stream_claimed")),
+          terminal: !!ctx?.terminal_at,
+          registration_failure:
+            (await this.state.storage.get("registration_failure")) ?? null,
+        });
+      }
       if (url.pathname === "/register") {
         if (
           !sameSecret(
@@ -262,6 +342,13 @@ export class VoiceSession {
       console.warn(
         JSON.stringify({ event: "voice_operation_failed", stage, category }),
       );
+      if (url.pathname === "/register") {
+        await this.state.storage.put("registration_failure", {
+          stage,
+          category,
+        });
+      }
+
       return reply(
         {
           error: "Voice operation unavailable",

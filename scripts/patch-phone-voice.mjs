@@ -22,19 +22,25 @@ export function patchPhone(original) {
     "  let response;",
     `  // GUARDED_OUTBOUND_VOICE_V1 — inbound code and legacy languages unchanged.
   if (env.OUTBOUND_VOICE_MODE === "guarded_jp" && row.language === "ja") {
+    let voiceStage = "configuration", voiceHttpStatus = null, controllerStage = null;
     try {
       if (!env.VOICE_CONTROL || !env.VOICE_CONTROL_API_SECRET) throw new Error("Voice configuration missing");
+      voiceStage = "registration";
       const registered = await env.VOICE_CONTROL.fetch("https://voice.internal/register", {
         method: "POST",
         headers: { Authorization: "Bearer " + env.VOICE_CONTROL_API_SECRET, "Content-Type": "application/json" },
         body: JSON.stringify({request_id: row.id, callback_token: callbackToken, destination: row.destination_number, from: env.TELNYX_OUTBOUND_FROM})
       });
-      if (!registered.ok) throw new Error("Voice controller unavailable");
+      voiceHttpStatus = registered.status;
       const dispatch = await registered.json();
+      controllerStage = ["request_validation","assistant_configuration","provider_connections","voice_session_ready","complete"].includes(dispatch.stage) ? dispatch.stage : null;
+      if (!registered.ok) throw new Error("Voice controller unavailable");
+      voiceStage = "contract_validation";
       if (dispatch.endpoint !== "https://api.telnyx.com/v2/calls" || dispatch.payload?.to !== row.destination_number || dispatch.payload?.from !== env.TELNYX_OUTBOUND_FROM || dispatch.payload?.command_id !== requestId || dispatch.payload?.time_limit_secs !== OUTBOUND_MAX_SECONDS || dispatch.payload?.connection_id !== env.OUTBOUND_VOICE_APP_ID || new URL(dispatch.payload?.stream_url).origin !== env.OUTBOUND_VOICE_ORIGIN.replace(/^https:/, "wss:")) throw new Error("Voice contract mismatch");
       endpoint = dispatch.endpoint;
       telnyxPayload = dispatch.payload;
     } catch {
+      console.warn(JSON.stringify({event:"outbound_voice_registration_failed",stage:voiceStage,status:voiceHttpStatus,controller_stage:controllerStage}));
       await db.prepare("UPDATE outbound_requests SET status = 'failed', last_error = 'voice_controller_unavailable', completed_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'dialing'").bind(requestId).run();
       return reply({error:"Guarded outbound voice unavailable"}, 503);
     }

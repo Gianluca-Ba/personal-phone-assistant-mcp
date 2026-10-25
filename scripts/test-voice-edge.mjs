@@ -13,6 +13,7 @@ class Memory{data=new Map();async get(k){return this.data.get(k)}async put(k,v){
 export default{async fetch(req){const mode=new URL(req.url).pathname;const calls=[],sockets=[];
 const row={id:crypto.randomUUID(),status:'dialing',callback_token:crypto.randomUUID(),destination_number:'+819022222222',language:'ja',instructions:'Offline test; never dial.'};
 const env={PREWARM_BEFORE_DIAL:'true',EXTERNAL_STT:'true',OUTBOUND_ASSISTANT_ID:'offline',OUTBOUND_ASSISTANT_VERSION:'version',TELNYX_API_KEY:'offline-only-key',VOICE_ORIGIN:'https://offline.invalid',VOICE_APP_ID:'123456',OUTBOUND_FROM:'+819011111111',DB:{prepare:()=>({bind:()=>({first:async()=>row})})}};
+if(mode==='/native-receiver'){const native=new VoiceBridge(new Memory(),env);try{await native.providerFetch('http://[invalid');return Response.json({rejected:false})}catch(e){return Response.json({rejected:true,illegal_invocation:/illegal invocation/i.test(e.message),invalid_url:/invalid.*url|url.*invalid|failed to parse url/i.test(e.message)})}}
 const b=new VoiceBridge(new Memory(),env,{providerFetch:async(url,options={})=>{
 // Constructing Request here exercises workerd validation, unlike a Node fetch mock.
 new Request(url,options);
@@ -42,6 +43,13 @@ const harness = createTestHarness({
 try {
   await harness.listen();
   const worker = harness.getWorker("offline-voice-edge");
+  const native = await (
+    await worker.fetch("https://offline.invalid/native-receiver")
+  ).json();
+  console.log(JSON.stringify({ native_receiver: native }));
+  assert.equal(native.rejected, true);
+  assert.equal(native.illegal_invocation, false);
+  assert.equal(native.invalid_url, true);
   const success = await (
     await worker.fetch("https://offline.invalid/success")
   ).json();
@@ -59,7 +67,7 @@ try {
   assert.equal(redirect.calls.length, 1);
   console.log(
     JSON.stringify({
-      checks: 6,
+      checks: 9,
       passed: true,
       runtime: "workerd",
       external_network: "never invoked",
