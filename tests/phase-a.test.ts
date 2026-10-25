@@ -246,3 +246,43 @@ it("reads only available columns, joins summaries, filters Tokyo dates and exclu
   expect(JSON.stringify(outbound)).not.toContain("NEVER_EXPOSE");
   expect(outbound[0]).toHaveProperty("duration", 60);
 });
+
+it("rejects unregistered redirect URIs and a mismatched PKCE verifier", async () => {
+  const metadata = (await (
+    await auth.fetch(issuer + "/.well-known/oauth-authorization-server")
+  ).json()) as any;
+  const client = (await (
+    await auth.fetch(metadata.registration_endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        redirect_uris: [
+          "https://chatgpt.com/connector_platform_oauth_redirect",
+        ],
+        token_endpoint_auth_method: "none",
+      }),
+    })
+  ).json()) as any;
+  const url = new URL(metadata.authorization_endpoint);
+  for (const [k, v] of Object.entries({
+    client_id: client.client_id,
+    response_type: "code",
+    redirect_uri: "https://unregistered.example/callback",
+    scope: "calls:read calls:write",
+    resource,
+    code_challenge: "b".repeat(43),
+    code_challenge_method: "S256",
+  }))
+    url.searchParams.set(k, v);
+  expect((await auth.fetch(url, { redirect: "manual" })).status).toBe(400);
+  const { login } = await import("./support");
+  const rejected = await login(
+    auth,
+    "calls:read",
+    secret,
+    undefined,
+    "wrong-verifier-".repeat(5),
+  );
+  expect(rejected.error).toBe("invalid_grant");
+  expect(rejected.access_token).toBeUndefined();
+});

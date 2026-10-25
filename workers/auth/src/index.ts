@@ -1,6 +1,9 @@
+import { OAuthStepUpState, stepUpKey } from "./step-up";
+export { OAuthStepUpState } from "./step-up";
 import {
   AuthorizationError,
   OAuthAuthorizationServer,
+  OAuthError,
   type AuthRequest,
 } from "@cloudflare/workers-oauth-provider";
 import { WorkerEntrypoint } from "cloudflare:workers";
@@ -13,6 +16,7 @@ interface Env {
   OWNER_LOGIN_SECRET: string;
   OWNER_TOKEN_VERSION: string;
   LOGIN_LIMITER: RateLimit;
+  OAUTH_STEP_UP: DurableObjectNamespace<OAuthStepUpState>;
 }
 const scopes = ["calls:read", "calls:write", "calls:execute", "offline_access"];
 const provider = new OAuthAuthorizationServer<Env>({
@@ -23,6 +27,31 @@ const provider = new OAuthAuthorizationServer<Env>({
   clientRegistrationEndpoint: "/oauth/register",
   accessTokenTTL: 300,
   refreshTokenTTL: 2592000,
+  async tokenExchangeCallback(options) {
+    const key = await stepUpKey(
+      options.userId,
+      options.clientId,
+      options.resource,
+    );
+    const state = options.env.OAUTH_STEP_UP.get(
+      options.env.OAUTH_STEP_UP.idFromName(key),
+    );
+    if (options.grantType === "authorization_code") {
+      // A fresh owner consent has happened. Preserve only its approved scopes.
+      await state.clear();
+    } else if (
+      options.grantType === "refresh_token" &&
+      (await state.requiresConsent(options.scope))
+    ) {
+      // SDK clients may refresh WITHOUT passing the requested step-up scopes.
+      // A successful read-only refresh would cause a 403 retry loop. invalid_grant
+      // makes the provider revoke this grant and the client open fresh consent.
+      throw new OAuthError("invalid_grant", {
+        description:
+          "Fresh owner authorization is required for additional scopes",
+      });
+    }
+  },
 });
 const escape = (v: string) =>
   v.replace(
@@ -142,6 +171,28 @@ export class AuthServer extends WorkerEntrypoint<Env> {
     } catch {
       return new Response("Authorization service unavailable", { status: 503 });
     }
+  }
+  async requireScopeUpgrade(resource: string, token: string, scopes: string[]) {
+    const validated = await provider.validateToken(resource, token, this.env);
+    if (
+      !validated ||
+      validated.userId !== "owner" ||
+      validated.props?.version !== this.env.OWNER_TOKEN_VERSION ||
+      resource !== RESOURCE
+    )
+      throw new Error("INVALID_STEP_UP_IDENTITY");
+    if (
+      !scopes.length ||
+      scopes.some(
+        (s) => !["calls:read", "calls:write", "calls:execute"].includes(s),
+      )
+    )
+      throw new Error("INVALID_STEP_UP_SCOPES");
+    if (scopes.every((s) => validated.scope.includes(s))) return;
+    const key = await stepUpKey(validated.userId, validated.clientId, resource);
+    await this.env.OAUTH_STEP_UP.get(
+      this.env.OAUTH_STEP_UP.idFromName(key),
+    ).requireConsent(scopes);
   }
   validateToken(resource: string, token: string) {
     return provider.validateToken(resource, token, this.env);

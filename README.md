@@ -82,13 +82,14 @@ npm run build
 
 La suite verifica anche identità/scope errati, metadati inventati, duplicati, cambi dei dettagli, scadenze, richieste non pending, rate limit, concorrenza, replay e risultati incerti. La telefonia è un servizio locale simulato; nessun test chiama la produzione.
 
-Per questa modifica distribuire **soltanto MCP**:
+Per il rilascio che corregge il refresh incrementale distribuire **Auth → MCP**:
 
 ```sh
+npm run deploy:auth
 npm run deploy:mcp
 ```
 
-Non eseguire bootstrap o `deploy:auth` per questo rilascio. Il sorgente auth non contiene più la pagina outbound; l’auth già pubblicato non viene aggiornato. Il suo vecchio binding verso `ApprovalServer` richiede di mantenere questo entrypoint come **tombstone inerte**: `describeTicket` e `confirmTicket` restituiscono sempre `WEB_APPROVAL_REMOVED`, senza inviare approvazioni. La vecchia route auth può restare presente fino a un aggiornamento auth separatamente autorizzato, ma non può approvare o avviare chiamate. Nessun nuovo link viene generato.
+Non eseguire bootstrap per questo aggiornamento. Auth espone il metodo RPC autenticato `requireScopeUpgrade` e usa `OAUTH_STEP_UP` per lo stato temporaneo di richiesta di un nuovo consenso. Non viene aggiunto un Worker e non viene modificato D1. L’entrypoint `ApprovalServer` resta un tombstone inerte per compatibilità con vecchie versioni: i suoi metodi legacy non possono eseguire chiamate. La route auth `/confirm` restituisce 410 e nessun link di approvazione viene generato.
 
 `npm run build` effettua soltanto dry-run. La CI esegue controlli e non distribuisce. Non distribuire mai questo progetto al Worker telefonico `personal-phone-assistant`.
 
@@ -105,3 +106,5 @@ La revoca standard è pubblicata nella discovery. KV è eventualmente consistent
 ## Autorizzazione incrementale OAuth
 
 I tool outbound richiedono ora un challenge HTTP `403 insufficient_scope`, completo di `WWW-Authenticate` e `_meta["mcp/www_authenticate"]`, invece di un normale errore “Missing authorization”. `tools/list` dichiara gli scope OAuth per ciascun tool. [Procedura precisa per aggiornare l’autorizzazione ChatGPT](docs/oauth-step-up.md). Lo scope aggiuntivo non abilita l’esecuzione reale.
+
+La riconnessione dalla chat è stata corretta anche nel percorso di refresh automatico: [causa riprodotta, correzione e consenso richiesto](docs/oauth-reconnect-diagnosis.md). Per questo rilascio sono necessari Auth e MCP, in quest’ordine; non il Worker telefonico.

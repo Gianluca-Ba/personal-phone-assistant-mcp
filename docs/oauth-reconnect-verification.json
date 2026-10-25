@@ -1,0 +1,25 @@
+{
+  "verified_at": "2026-10-25T00:01:00.249Z",
+  "tests_passed": 16,
+  "auth_version": "9bf63d07-dadb-4722-b6a7-c26dae6a4a99",
+  "mcp_version": "3e30f0f6-390e-4abc-976d-4717c2de0d72",
+  "sdk_reproduced_error_before_fix": "Server returned 403 after trying upscoping",
+  "sdk_regression_after_fix": "fresh PKCE authorization, new token, successful simulated pending request",
+  "live_client_result": "OUTBOUND_DISABLED",
+  "live_incremental_consent": {
+    "scopes": ["calls:read", "calls:write"],
+    "authorize_get": 200,
+    "authorize_post": 302,
+    "token_post": 200
+  },
+  "real_phone_calls_performed": false,
+  "checks": {
+    "only_auth_and_mcp_updated": true,
+    "phone_worker_unchanged": true,
+    "outbound_disabled": true,
+    "strongly_consistent_step_up_state": true,
+    "verified_native_consent_code_unchanged": true,
+    "advertised_resource_metadata_valid": true,
+    "production_oauth_discovery_valid": true
+  }
+}

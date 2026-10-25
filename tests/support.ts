@@ -5,6 +5,7 @@ export async function login(
   scope: string,
   secret: string,
   existingClientId?: string,
+  exchangeVerifier?: string,
 ) {
   const issuer =
     "https://personal-phone-assistant-auth.barsaglini-gianluca.workers.dev";
@@ -72,7 +73,7 @@ export async function login(
         client_id: client.client_id,
         redirect_uri: redirect,
         code,
-        code_verifier: verifier,
+        code_verifier: exchangeVerifier ?? verifier,
         resource,
       }),
     })

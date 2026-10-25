@@ -28,4 +28,18 @@
   "observability": {
     "enabled": false,
   },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "OAUTH_STEP_UP",
+        "class_name": "OAuthStepUpState",
+      },
+    ],
+  },
+  "migrations": [
+    {
+      "tag": "v1-step-up",
+      "new_sqlite_classes": ["OAuthStepUpState"],
+    },
+  ],
 }

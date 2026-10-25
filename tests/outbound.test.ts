@@ -471,18 +471,8 @@ it("steps up the same OAuth client from read to write and execute using complete
       scope: "calls:read calls:write offline_access",
     }),
   });
-  expect(widenedRefresh.status).toBe(200);
-  const refreshedRead = (await widenedRefresh.json()) as any;
-  expect(refreshedRead.scope.split(" ")).not.toContain("calls:write");
-  expect(
-    (
-      await invoke(
-        refreshedRead.access_token,
-        "create_outbound_request",
-        details,
-      )
-    ).status,
-  ).toBe(403);
+  expect(widenedRefresh.status).toBe(400);
+  expect(await widenedRefresh.json()).toMatchObject({ error: "invalid_grant" });
   const write = await login(
     auth,
     "calls:read calls:write offline_access",
@@ -568,4 +558,112 @@ it("steps up the same OAuth client from read to write and execute using complete
   expect(needRead.headers.get("WWW-Authenticate")).toContain(
     'scope="calls:read calls:write"',
   );
+});
+
+it("official SDK opens fresh PKCE consent instead of looping on a read-only refresh", async () => {
+  const { StreamableHTTPClientTransport } =
+    await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
+  const issuer =
+    "https://personal-phone-assistant-auth.barsaglini-gianluca.workers.dev";
+  const resource =
+    "https://personal-phone-assistant-mcp.barsaglini-gianluca.workers.dev/mcp";
+  const read = await login(auth, "calls:read offline_access", secret);
+  let savedTokens: any = { ...read, issuer };
+  let redirectURL: URL | undefined;
+  let verifier = "";
+  const provider: any = {
+    redirectUrl: "https://client.example/callback",
+    clientMetadata: {
+      redirect_uris: ["https://client.example/callback"],
+      token_endpoint_auth_method: "none",
+    },
+    clientInformation: () => ({
+      client_id: read.clientId,
+      token_endpoint_auth_method: "none",
+      issuer,
+    }),
+    saveClientInformation: () => {},
+    tokens: () => savedTokens,
+    saveTokens: (v: any) => {
+      savedTokens = v;
+    },
+    codeVerifier: () => verifier,
+    saveCodeVerifier: (v: string) => {
+      verifier = v;
+    },
+    redirectToAuthorization: (u: URL) => {
+      redirectURL = u;
+    },
+    invalidateCredentials: () => {
+      savedTokens = undefined;
+    },
+  };
+  const exchanges: { path: string; status: number }[] = [];
+  const fetchFn: any = async (url: any, init: any) => {
+    const u = new URL(
+      typeof url === "string" ? url : url instanceof URL ? url.href : url.url,
+    );
+    const r = await (u.origin === issuer ? auth : real).fetch(url, init);
+    exchanges.push({ path: u.pathname, status: r.status });
+    return r;
+  };
+  const transport = new StreamableHTTPClientTransport(new URL(resource), {
+    authProvider: provider,
+    fetch: fetchFn,
+  });
+  const other = await login(auth, "calls:read offline_access", secret);
+  const messages: any[] = [];
+  transport.onmessage = (m: any) => messages.push(m);
+  await transport.start();
+  const request = {
+    jsonrpc: "2.0" as const,
+    id: 40,
+    method: "tools/call",
+    params: { name: "create_outbound_request", arguments: input() },
+  };
+  await expect(transport.send(request)).rejects.toThrow("Unauthorized");
+  expect(exchanges).toContainEqual({ path: "/oauth/token", status: 400 });
+  const otherRefresh = await auth.fetch(issuer + "/oauth/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: other.refresh_token,
+      client_id: other.clientId,
+      resource,
+    }),
+  });
+  expect(otherRefresh.status).toBe(200);
+  expect(((await otherRefresh.json()) as any).scope.split(" ")).not.toContain(
+    "calls:write",
+  );
+  expect(redirectURL).toBeDefined();
+  expect(redirectURL!.searchParams.get("scope")).toBe("calls:read calls:write");
+  expect(redirectURL!.searchParams.get("code_challenge_method")).toBe("S256");
+  const consent = await auth.fetch(redirectURL!);
+  expect(consent.status).toBe(200);
+  const html = await consent.text(),
+    nonce = /name="nonce" value="([^"]+)"/.exec(html)![1];
+  const approved = await auth.fetch(issuer + "/authorize", {
+    method: "POST",
+    redirect: "manual",
+    headers: {
+      Origin: issuer,
+      "CF-Connecting-IP": "192.0.2.220",
+      Cookie: consent.headers.get("set-cookie")!.split(";")[0],
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({ nonce, secret }),
+  });
+  expect(approved.status).toBe(302);
+  const callback = new URL(approved.headers.get("location")!);
+  expect(callback.searchParams.get("iss")).toBe(issuer);
+  await transport.finishAuth(callback.searchParams.get("code")!);
+  expect(savedTokens.scope.split(" ")).toContain("calls:write");
+  await transport.send(request);
+  expect(messages.at(-1)?.result.isError).not.toBe(true);
+  expect(JSON.parse(messages.at(-1).result.content[0].text).request.state).toBe(
+    "pending_approval",
+  );
+  await transport.close();
 });

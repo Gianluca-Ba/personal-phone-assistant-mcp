@@ -31,7 +31,13 @@ interface Props {
 }
 interface Env extends OutboundEnv {
   DB: D1Database;
-  AUTH_SERVER: AuthorizationServerBinding<Props>;
+  AUTH_SERVER: AuthorizationServerBinding<Props> & {
+    requireScopeUpgrade(
+      resource: string,
+      token: string,
+      scopes: string[],
+    ): Promise<void>;
+  };
   OWNER_TOKEN_VERSION: string;
   SCHEMA_MAPPING?: string;
 }
@@ -249,8 +255,25 @@ export default new OAuthResourceServer<Env, Props>({
         return new Response("Forbidden origin", { status: 403 });
       const preflight = await scopePreflight(request);
       if (preflight instanceof Response) return preflight;
-      if (!preflight.scopes.every((scope) => ctx.auth.scope.includes(scope)))
+      if (!preflight.scopes.every((scope) => ctx.auth.scope.includes(scope))) {
+        const bearer = request.headers
+          .get("Authorization")
+          ?.match(/^Bearer\s+(.+)$/i)?.[1];
+        if (!bearer)
+          return new Response("Invalid authorization", { status: 401 });
+        try {
+          await env.AUTH_SERVER.requireScopeUpgrade(
+            resource,
+            bearer,
+            preflight.scopes,
+          );
+        } catch {
+          return new Response("OAuth step-up temporarily unavailable", {
+            status: 503,
+          });
+        }
         return scopeChallenge(ctx.auth, preflight.scopes, preflight.rpcId);
+      }
       const transport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
         enableJsonResponse: true,

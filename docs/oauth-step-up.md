@@ -1,5 +1,7 @@
 # OAuth incrementale per ChatGPT
 
+**Aggiornamento:** il ciclo di refresh osservato dopo questo rilascio è stato corretto. Vedi [diagnosi e correzione della riconnessione dalla chat](oauth-reconnect-diagnosis.md). Il catalogo scope era corretto, ma serviva obbligare il client a ottenere un nuovo consenso invece di riutilizzare il vecchio grant.
+
 ## Problema e correzione
 
 Il vecchio token `calls:read` veniva rifiutato dal callback del tool con un normale `isError` e testo “Missing calls:write authorization”. Mancava il challenge necessario a far richiedere al client gli scope aggiuntivi. Riconnettere il plugin ripartiva dal minimo di lettura, senza risolvere la causa.
