@@ -240,6 +240,22 @@ export class VoiceSession {
           stage: this.bridge.preflightStage ?? null,
           stream_claimed: !!(await this.state.storage.get("stream_claimed")),
           terminal: !!ctx?.terminal_at,
+          ivr_progress: ctx?.ivr_progress
+            ? {
+                state: ctx.ivr_progress.state,
+                accepted_at: ctx.ivr_progress.accepted_at,
+                deadline: ctx.ivr_progress.deadline,
+                evidence_kind: ctx.ivr_progress.evidence?.kind ?? null,
+              }
+            : null,
+          audit:
+            typeof this.state.storage.list === "function"
+              ? [
+                  ...(
+                    await this.state.storage.list({ prefix: "audit/" })
+                  ).values(),
+                ].sort((a, b) => a.at - b.at)
+              : [],
           registration_failure:
             (await this.state.storage.get("registration_failure")) ?? null,
         });

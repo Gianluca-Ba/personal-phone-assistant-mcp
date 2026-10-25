@@ -35,8 +35,11 @@
     "guarded_phone_checks": 29
   },
   "limits": [
+    "Completed is a transport status; command acceptance does not prove PSTN reception or successful IVR navigation.",
     "One successful destination/menu is not general carrier reliability proof.",
     "Final call ended remotely after an interruption; autonomous post-interruption hangup was not verified.",
     "Synthetic and live traces remain private."
-  ]
+  ],
+  "navigation_success_verified": false,
+  "walk_in_information_obtained": false
 }

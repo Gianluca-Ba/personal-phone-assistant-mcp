@@ -1,4 +1,4 @@
-import { expect, it, afterEach } from "vitest";
+import { expect, it, afterEach, vi } from "vitest";
 import { generateKeyPairSync, sign } from "node:crypto";
 const { validSignature, validStreamUpgrade } = await import(
   new URL("../workers/voice/src/security.mjs", import.meta.url).href
@@ -48,6 +48,7 @@ afterEach(() => {
     b.cleanup();
   }
   bridges.length = 0;
+  vi.useRealTimers();
 });
 function fixture(provider?: any) {
   let now = Date.now();
@@ -668,4 +669,130 @@ it("does not invalidate an IVR snapshot for raw music/noise, but rejects it afte
   await f.b.controller.tick();
   expect((await select).reason).toBe("STALE_OR_INCOMPLETE_MENU");
   expect(f.network.some((n) => n.url.endsWith("/send_dtmf"))).toBe(false);
+});
+it("records a requested/accepted DTMF once with explicit duration and never treats acceptance as a transition", async () => {
+  const f = fixture();
+  await f.register();
+  await f.b.attachMedia(new Socket());
+  await f.b.bindCall("bound-call");
+  f.b.controller.menu = { text: "その他のご質問は五を押してください。" };
+  await f.b.sendIvrDigit("5", { operationId: "selection" });
+  const deadline = f.b.context.ivr_progress.deadline;
+  await f.b.sendIvrDigit("5", { operationId: "selection" });
+  expect(f.network.filter((n) => n.url.endsWith("/send_dtmf"))).toHaveLength(1);
+  expect(
+    f.network.find((n) => n.url.endsWith("/send_dtmf")).body.duration_millis,
+  ).toBe(250);
+  const audit = [...f.storage.data.values()].filter((v) => v.event);
+  expect(audit.filter((v) => v.event === "dtmf_requested")).toHaveLength(1);
+  expect(audit.filter((v) => v.event === "dtmf_accepted")).toHaveLength(1);
+  expect(f.b.context.ivr_progress.state).toBe("awaiting_transition");
+  expect(f.b.context.ivr_progress.deadline).toBe(deadline);
+  await f.b.observeIvrProgress("その他のご質問は五を押してください。");
+  expect(f.b.context.ivr_progress.state).toBe("awaiting_transition");
+  await f.b.observeIvrProgress("担当者におつなぎいたします。");
+  expect(f.b.context.ivr_progress.state).toBe("transition_observed");
+  f.advance(60000);
+  await f.b.checkIvrDeadline();
+  expect(f.network.some((n) => n.url.endsWith("/speak"))).toBe(false);
+});
+it("ends a no-transition attempt after its bounded wait, and records completion only on the actual hangup webhook", async () => {
+  const f = fixture();
+  await f.register();
+  await f.b.attachMedia(new Socket());
+  await f.b.bindCall("bound-call");
+  f.b.context.answered_at = new Date().toISOString();
+  f.b.controller.menu = { text: "その他のご質問は五を押してください。" };
+  await f.b.sendIvrDigit("5", { operationId: "selection" });
+  f.advance(44999);
+  await f.b.checkIvrDeadline();
+  expect(f.network.some((n) => n.url.endsWith("/speak"))).toBe(false);
+  f.advance(1);
+  await Promise.all([f.b.checkIvrDeadline(), f.b.checkIvrDeadline()]);
+  expect(f.b.context.close_outcome).toBe("unable_to_proceed");
+  expect(f.b.context.failure).toBe("ivr_transition_timeout");
+  expect(f.network.filter((n) => n.url.endsWith("/speak"))).toHaveLength(1);
+  expect(f.network.some((n) => n.url.endsWith("/hangup"))).toBe(false);
+  const speakEnded = {
+    id: crypto.randomUUID(),
+    event_type: "call.speak.ended",
+    occurred_at: new Date().toISOString(),
+    payload: {
+      connection_id: f.env.VOICE_APP_ID,
+      call_control_id: "bound-call",
+      client_state: f.b.context.fallback_state,
+      status: "completed",
+    },
+  };
+  await f.b.onWebhook(speakEnded);
+  await f.b.finishFallback();
+  expect(f.network.filter((n) => n.url.endsWith("/hangup"))).toHaveLength(1);
+  expect(
+    [...f.storage.data.values()].some((v) => v.event === "hangup_completed"),
+  ).toBe(false);
+  const end = {
+    ...speakEnded,
+    id: crypto.randomUUID(),
+    event_type: "call.hangup",
+    payload: { ...speakEnded.payload, hangup_source: "caller" },
+  };
+  await Promise.all([f.b.onWebhook(end), f.b.onWebhook(end)]);
+  expect(
+    [...f.storage.data.values()].filter((v) => v.event === "hangup_completed"),
+  ).toHaveLength(1);
+});
+it("does not arm transition tracking or log acceptance for an uncertain DTMF dispatch", async () => {
+  const f = fixture(async () => {
+    throw Error("Unknown transport outcome");
+  });
+  await f.register();
+  await f.b.bindCall("bound-call");
+  f.b.controller = { menu: { text: "五を押してください。" } };
+  expect((await f.b.sendIvrDigit("5", { operationId: "selection" })).ok).toBe(
+    false,
+  );
+  expect(f.b.context.ivr_progress).toBeUndefined();
+  expect(
+    [...f.storage.data.values()].some((v) => v.event === "dtmf_accepted"),
+  ).toBe(false);
+});
+it("uses one bounded fallback hangup even if the farewell completion callback is lost", async () => {
+  vi.useFakeTimers();
+  const f = fixture();
+  await f.register();
+  await f.b.attachMedia(new Socket());
+  await f.b.bindCall("bound-call");
+  f.b.context.answered_at = new Date().toISOString();
+  f.b.controller.menu = { text: "その他のご質問は五を押してください。" };
+  await f.b.sendIvrDigit("5", { operationId: "selection" });
+  f.advance(45000);
+  await f.b.checkIvrDeadline();
+  await vi.advanceTimersByTimeAsync(19999);
+  expect(f.network.some((n) => n.url.endsWith("/hangup"))).toBe(false);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(f.network.filter((n) => n.url.endsWith("/hangup"))).toHaveLength(1);
+  await f.b.finishFallback();
+  expect(f.network.filter((n) => n.url.endsWith("/hangup"))).toHaveLength(1);
+  expect(
+    [...f.storage.data.values()].some((v) => v.event === "hangup_completed"),
+  ).toBe(false);
+});
+it("lets a current IVR sentence finish before the no-transition close, without waiting five minutes", async () => {
+  const f = fixture();
+  await f.register();
+  await f.b.attachMedia(new Socket());
+  await f.b.bindCall("bound-call");
+  f.b.context.answered_at = new Date().toISOString();
+  f.b.controller.menu = {
+    text: "その他のご質問は五を押してください。",
+    isIvr: true,
+  };
+  await f.b.sendIvrDigit("5", { operationId: "selection" });
+  f.b.controller.speaking = true;
+  f.advance(45000);
+  await f.b.checkIvrDeadline();
+  expect(f.network.some((n) => n.url.endsWith("/speak"))).toBe(false);
+  f.b.controller.speaking = false;
+  await f.b.checkIvrDeadline();
+  expect(f.network.filter((n) => n.url.endsWith("/speak"))).toHaveLength(1);
 });

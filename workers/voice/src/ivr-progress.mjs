@@ -1,0 +1,71 @@
+import { sha256 } from "./security.mjs";
+export const menuText = (text) =>
+  text
+    .normalize("NFKC")
+    .replace(/[一二三四五六七八九〇]/g, (c) =>
+      String("〇一二三四五六七八九".indexOf(c)),
+    )
+    .replace(/[。、,.\s]/g, "")
+    .toLowerCase();
+const ivr =
+  /押してください|選択してください|入力してください|お選びください|\bpress\b|\bdial\b/i;
+export function progressEvidence(baseline, transcript, seen = []) {
+  const text = menuText(transcript),
+    old = menuText(baseline);
+  if (
+    !text ||
+    old.includes(text) ||
+    text === old ||
+    seen.includes(sha256(text))
+  )
+    return null;
+  // A routing announcement is evidence of a new observable state, not proof of
+  // carrier DTMF reception. Conditional menu labels such as 転送するには do not qualify.
+  if (
+    /おつなぎ(?:し|いた)|お繋ぎ(?:し|いた)|転送(?:し|いたし)ます|順番におつなぎ/i.test(
+      transcript,
+    )
+  )
+    return { kind: "routing_announcement", digest: sha256(text) };
+  if (
+    ivr.test(transcript) &&
+    /[0-9*#](?:番)?(?:を|に|です|[、,]|\s)/.test(
+      transcript
+        .normalize("NFKC")
+        .replace(/[一二三四五六七八九〇]/g, (c) =>
+          String("〇一二三四五六七八九".indexOf(c)),
+        ),
+    )
+  ) {
+    // Reject partial/repeated announcements with minor ASR variation.
+    const grams = (s) =>
+      new Set(
+        Array.from({ length: Math.max(0, s.length - 1) }, (_, i) =>
+          s.slice(i, i + 2),
+        ),
+      );
+    const a = grams(old),
+      b = grams(text),
+      intersection = [...b].filter((x) => a.has(x)).length;
+    if (intersection / Math.max(1, Math.min(a.size, b.size)) >= 0.7)
+      return null;
+    return { kind: "changed_menu", digest: sha256(text) };
+  }
+  if (
+    !ivr.test(transcript) &&
+    /お待たせ(?:いた)?しました|担当の.{1,12}(?:です|でございます)|ご用件(?:を|は)|どのような/.test(
+      transcript,
+    )
+  )
+    return { kind: "human_greeting_candidate", digest: sha256(text) };
+  return null;
+}
+export function dtmfTuning(env) {
+  const duration = Number(env.OUTBOUND_DTMF_DURATION_MS ?? 250),
+    timeout = Number(env.OUTBOUND_IVR_TRANSITION_TIMEOUT_MS ?? 45000);
+  if (!Number.isInteger(duration) || duration < 100 || duration > 500)
+    throw Error("Invalid DTMF duration");
+  if (!Number.isInteger(timeout) || timeout < 10000 || timeout > 120000)
+    throw Error("Invalid IVR transition timeout");
+  return { duration, timeout };
+}

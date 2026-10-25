@@ -49,3 +49,7 @@ The call ended normally at 17:19:12.855 JST; MCP reports completed with the conv
 Final deployments: controller `aa20be16-dfae-4b39-9718-9431d726d606`; phone outbound logging `8badc6f7-330a-49f3-b1f8-917f99f21286`. Active diagnostic preflights are disabled. Inbound, MCP/Auth and Telnyx production configuration remain unchanged. Sanitized evidence is in `voice/jp/live-dtmf-validation-2026-10-25.json`. Raw traces, recordings and credentials are not published.
 
 Final local validation: 100 unit tests, 11 workerd checks, 24 legacy and 29 guarded phone-contract checks, type checking and Worker dry builds pass. The native fetch correction commit is `7fb0e70`; the following commit contains the media/menu regressions and live evidence.
+
+## Follow-up: acceptance is not navigation
+
+The later final call report for `8840183d-8a74-4570-84a5-ad8853f09e4f` did not establish remote recognition or an operator and hit the carrier time limit. See [the separate transmission and progress investigation](apple-kawasaki-ivr-investigation-2026-10-25.md). The successful backend/provider command in this document must not be presented as proof of PSTN tone reception, IVR navigation or walk-in information.

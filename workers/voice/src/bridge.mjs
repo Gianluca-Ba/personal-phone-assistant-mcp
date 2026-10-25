@@ -1,3 +1,4 @@
+import { dtmfTuning, progressEvidence, menuText } from "./ivr-progress.mjs";
 import { fetchSocketUpgrade } from "./upgrade.mjs";
 import { MediaActivity, SttTurns, genuineInterruption } from "./turns.mjs";
 import { isBackchannel } from "../../../scripts/jp-backchannel.mjs";
@@ -47,6 +48,7 @@ export class VoiceBridge {
     return this.context;
   }
   async register(body) {
+    dtmfTuning(this.env); // Validate supported limits before returning any dial contract.
     const existing = await this.load();
     const row = await this.env.DB.prepare(
       "SELECT * FROM outbound_requests WHERE id = ?",
@@ -233,6 +235,7 @@ export class VoiceBridge {
       );
       result = {
         ok: r.ok,
+        http_status: r.status,
         ...(!r.ok ? { reason: "PROVIDER_HTTP_" + r.status } : {}),
       };
     } catch {
@@ -244,6 +247,127 @@ export class VoiceBridge {
       await this.persist();
     }
     return result;
+  }
+  async recordEvent(event, operation, details = {}) {
+    const key = "audit/" + event + "/" + sha256(operation);
+    const entry = { event, at: this.now(), ...details };
+    const created = await this.storage.transaction(async (tx) => {
+      if (await tx.get(key)) return false;
+      await tx.put(key, entry);
+      return true;
+    });
+    if (created) console.info(JSON.stringify(entry));
+  }
+  async sendIvrDigit(digits, operation) {
+    const tuning = dtmfTuning(this.env),
+      id = commandUUID(
+        this.context.call_id + ":send_dtmf:" + operation.operationId,
+      );
+    const baseline = this.controller.menu?.text ?? "";
+    await this.recordEvent("dtmf_requested", id, {
+      command_id: id,
+      digit: digits,
+      duration_millis: tuning.duration,
+      call_leg_id: this.context.call_leg_id ?? null,
+    });
+    const result = await this.voiceAPI(
+      "send_dtmf",
+      { digits, duration_millis: tuning.duration },
+      operation.operationId,
+    );
+    if (result.ok) {
+      await this.recordEvent("dtmf_accepted", id, {
+        command_id: id,
+        http_status: result.http_status ?? null,
+        call_leg_id: this.context.call_leg_id ?? null,
+      });
+      if (this.context.ivr_progress?.command_id !== id) {
+        this.context.ivr_progress = {
+          command_id: id,
+          state: "awaiting_transition",
+          accepted_at: this.now(),
+          deadline: this.now() + tuning.timeout,
+          baseline,
+        };
+        await this.persist();
+      }
+    } else
+      await this.recordEvent("dtmf_not_accepted", id, {
+        command_id: id,
+        reason: result.reason ?? "unknown",
+        http_status: result.http_status ?? null,
+      });
+    return result.ok ? { ok: true } : { ok: false, reason: result.reason };
+  }
+  async observeIvrProgress(text) {
+    const p = this.context.ivr_progress;
+    const known = this.context.seen_recipient_digests ?? [];
+    if (p?.state === "awaiting_transition") {
+      const evidence = progressEvidence(p.baseline, text, known);
+      if (evidence) {
+        p.state =
+          evidence.kind === "human_greeting_candidate"
+            ? "dialogue_candidate"
+            : "transition_observed";
+        p.evidence = evidence;
+        p.observed_at = this.now();
+        await this.recordEvent(
+          evidence.kind === "human_greeting_candidate"
+            ? "ivr_transition_candidate"
+            : "ivr_transition_detected",
+          p.command_id,
+          {
+            command_id: p.command_id,
+            evidence_kind: evidence.kind,
+            evidence_digest: evidence.digest,
+            carrier_reception_proven: false,
+          },
+        );
+      }
+    }
+    const digest = sha256(menuText(text));
+    this.context.seen_recipient_digests = [
+      ...known.filter((x) => x !== digest),
+      digest,
+    ].slice(-32);
+    await this.persist();
+  }
+  async checkIvrDeadline() {
+    const p = this.context?.ivr_progress;
+    if (
+      this.ended ||
+      this.failing ||
+      this.ivrDeadlineBusy ||
+      p?.state !== "awaiting_transition" ||
+      this.now() < p.deadline
+    )
+      return;
+    // Let an in-flight recipient sentence finish; only a known repeated IVR
+    // announcement may be cut after the bounded grace period.
+    if (
+      this.controller?.speaking &&
+      (this.now() < p.deadline + 20000 || !this.controller.menu?.isIvr)
+    )
+      return;
+    this.ivrDeadlineBusy = true;
+    try {
+      p.state = "transition_timeout";
+      this.context.close_outcome = "unable_to_proceed";
+      await this.recordEvent("ivr_transition_timeout", p.command_id, {
+        command_id: p.command_id,
+        wait_ms: this.now() - p.accepted_at,
+      });
+      await this.fail("ivr_transition_timeout");
+    } finally {
+      this.ivrDeadlineBusy = false;
+    }
+  }
+  async finishFallback() {
+    const result = await this.voiceAPI("hangup", {}, "fallback-termination");
+    if (result.ok) {
+      this.ended = true;
+      this.cleanup();
+    }
   }
   async bindConversation(force = false) {
     if (
@@ -462,6 +586,7 @@ export class VoiceBridge {
         this.controller.responseActive)
     )
       this.cancelOutput();
+    this.background(this.observeIvrProgress(text));
     this.context.filtered_aizuchi =
       (this.context.filtered_aizuchi ?? 0) + (listening ? 1 : 0);
     this.turnOpen = false;
@@ -559,8 +684,7 @@ export class VoiceBridge {
         this.env.CONTROLLED_FAREWELL === "true"
           ? (outcome, op) => this.playControlledFarewell(outcome, op)
           : null,
-      sendDigit: async (digits, op) =>
-        this.voiceAPI("send_dtmf", { digits }, op.operationId),
+      sendDigit: (digits, op) => this.sendIvrDigit(digits, op),
       close: async (outcome, op) => this.terminate(outcome, op.operationId),
     });
     this.marks = new PlaybackMarks({
@@ -609,6 +733,9 @@ export class VoiceBridge {
     this.timer = setInterval(() => {
       this.controller.transportQueuePending = this.marks.pending.size > 0;
       void this.controller.tick().catch(() => this.fail("controller_failed"));
+      void this.checkIvrDeadline().catch(() =>
+        this.fail("ivr_watchdog_failed"),
+      );
     }, 50);
     this.deadline = setTimeout(() => this.fail("media_deadline"), 330000);
   }
@@ -927,6 +1054,14 @@ export class VoiceBridge {
       state.nonce !== this.context.nonce
     )
       return json({ error: "Webhook context mismatch" }, 403);
+    if (payload.call_leg_id) {
+      if (
+        this.context.call_leg_id &&
+        this.context.call_leg_id !== payload.call_leg_id
+      )
+        return json({ error: "Call leg mismatch" }, 403);
+      this.context.call_leg_id = payload.call_leg_id;
+    }
     await this.bindCall(payload.call_control_id);
     if (
       (this.context.terminal_at || this.context.close_dispatched) &&
@@ -962,6 +1097,23 @@ export class VoiceBridge {
           : statusForEnd(payload, !!this.context.answered_at),
         Number.isFinite(duration) ? duration : undefined,
       );
+      if (this.context.failure === "ivr_transition_timeout")
+        await this.env.DB.prepare(
+          "UPDATE outbound_requests SET last_error = ? WHERE id = ? AND callback_token = ? AND telnyx_call_id = ? AND status = 'failed'",
+        )
+          .bind(
+            this.context.failure,
+            this.context.request_id,
+            this.context.callback_token,
+            this.context.call_id,
+          )
+          .run();
+      await this.recordEvent("hangup_completed", "call-termination", {
+        hangup_source: ["caller", "callee"].includes(payload.hangup_source)
+          ? payload.hangup_source
+          : "unknown",
+        outcome: this.context.close_outcome ?? "unspecified",
+      });
       this.context.terminal_at = event.occurred_at;
       await this.persist();
       this.ended = true;
@@ -981,9 +1133,7 @@ export class VoiceBridge {
       payload.client_state === this.context.fallback_state &&
       payload.status === "completed"
     ) {
-      await this.voiceAPI("hangup", {}, "fallback-completed");
-      this.ended = true;
-      this.cleanup();
+      await this.finishFallback();
     }
     await this.storage.put("event/" + event.id, true);
     return json({ received: true });
@@ -1023,6 +1173,7 @@ export class VoiceBridge {
       return;
     }
     this.context.failure ??= reason;
+    if (this.controller) this.controller.closing = true;
     if (!this.context.call_id) {
       await this.persist();
       this.cleanup();
@@ -1043,14 +1194,22 @@ export class VoiceBridge {
       }),
     ).toString("base64");
     await this.persist();
+    try {
+      await this.bindConversation(true);
+    } catch {
+      /* Closing must not depend on summary metadata availability. */
+    }
     // This is an outbound-only Voice API call, never a TeXML/AI-managed call.
     if (this.voice?.readyState === 1) this.voice.close();
     if (this.media?.readyState === 1)
       this.marks?.clear((m) => this.sendMedia(m));
-    const result = await this.voiceAPI(
+    await this.voiceAPI(
       "speak",
       {
-        payload: "申し訳ございません。接続に問題があるため、失礼いたします。",
+        payload:
+          reason === "ivr_transition_timeout"
+            ? "操作後の応答を確認できませんでしたので、失礼いたします。"
+            : "申し訳ございません。接続に問題があるため、失礼いたします。",
         payload_type: "text",
         voice: "female",
         language: "ja-JP",
@@ -1058,9 +1217,12 @@ export class VoiceBridge {
       },
       "technical-farewell",
     );
-    if (!result.ok) {
-      /* The provider's 300-second call limit remains the final bound. */
-    }
+    // One shared idempotency key for callback and deadline; never duplicate hangup.
+    if (!this.ended)
+      this.fallbackDeadline = setTimeout(
+        () => this.background(this.finishFallback()),
+        20000,
+      );
   }
   cleanup() {
     clearInterval(this.timer);
@@ -1074,6 +1236,7 @@ export class VoiceBridge {
     clearTimeout(this.orphanTimer);
     clearTimeout(this.cleanupDelay);
     clearTimeout(this.mediaStopTimer);
+    clearTimeout(this.fallbackDeadline);
     try {
       this.voice?.close();
     } catch {}

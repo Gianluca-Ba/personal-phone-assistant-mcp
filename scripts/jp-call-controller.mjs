@@ -105,7 +105,7 @@ export class CallController {
           text,
         );
       this.closingBlocked =
-        /お待ち|保留|確認します|質問|その前|ちょっと待|hold|wait|question|[?？]/i.test(
+        /お待ち|保留|確認します|質問があります|質問したい|その前|ちょっと待|hold|wait|question|[?？]/i.test(
           text,
         );
       const core = text.replace(

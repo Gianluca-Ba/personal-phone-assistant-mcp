@@ -400,3 +400,18 @@ it("expires an awaiting selection without sending a tone during continuous speec
   expect((await p).reason).toBe("MENU_NOT_COMPLETE");
   expect(h.digits).toEqual([]);
 });
+it("does not mistake the IVR label その他のご質問 for a new recipient question that blocks closing", async () => {
+  const h = harness();
+  h.menu("その他のご質問は五を押してください。");
+  expect(h.c.closingBlocked).toBe(false);
+  expect(
+    (
+      await h.c.command("close", "finish_call_after_goodbye", {
+        outcome: "unable_to_proceed",
+      })
+    ).ok,
+  ).toBe(true);
+  const n = harness();
+  n.menu("その前に質問があります。");
+  expect(n.c.closingBlocked).toBe(true);
+});

@@ -22,6 +22,8 @@
   "vars": {
     "VOICE_EXECUTION_ENABLED": "false",
     "VOICE_DIAGNOSTICS_ENABLED": "false",
+    "OUTBOUND_DTMF_DURATION_MS": "250",
+    "OUTBOUND_IVR_TRANSITION_TIMEOUT_MS": "45000",
     "PSTN_PILOT_VERIFIED": "false",
     "VOICE_ORIGIN": "https://personal-phone-assistant-voice.barsaglini-gianluca.workers.dev",
     "OUTBOUND_ASSISTANT_ID": "",
