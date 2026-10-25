@@ -1,0 +1,173 @@
+{
+  "provenance": "Actual Telnyx virtual audio session evidence; no PSTN",
+  "real_calls": 0,
+  "passed": false,
+  "missing_scenarios": [
+    "ivr-no-option",
+    "ivr-sensitive",
+    "unavailable"
+  ],
+  "results": [
+    {
+      "scenario": "ivr-change",
+      "passed": false,
+      "issues": [
+        "unexpected_tool",
+        "dtmf_sequence_mismatch"
+      ],
+      "dtmf_digits": [],
+      "hangup_attempts": 0,
+      "real_calls": 0,
+      "source_sha256": "a565b43599cb6380defa6906f379d65441764d0431a4666c8f85f4c9bc9994c8",
+      "assistant_version": null,
+      "backend_model": null
+    },
+    {
+      "scenario": "ivr-multilevel",
+      "passed": false,
+      "issues": [
+        "unexpected_tool",
+        "dtmf_sequence_mismatch",
+        "menu_sequence_incomplete"
+      ],
+      "dtmf_digits": [],
+      "hangup_attempts": 0,
+      "real_calls": 0,
+      "source_sha256": "4d6466bbcc0b71d48726384cf0e10039d1c63a87f7c84617f00596c0eaa802a6",
+      "assistant_version": null,
+      "backend_model": null
+    },
+    {
+      "scenario": "ivr-repeat",
+      "passed": false,
+      "issues": [
+        "unexpected_tool",
+        "dtmf_sequence_mismatch",
+        "menu_sequence_incomplete",
+        "terminal_not_closed_once",
+        "farewell_not_established",
+        "hangup_before_completed_farewell_response"
+      ],
+      "dtmf_digits": [],
+      "hangup_attempts": 0,
+      "real_calls": 0,
+      "source_sha256": "2bcf1e26a8ac39f7d75974a441b2cb4596f0454b8c8d73f854e94b60471dfeb4",
+      "assistant_version": null,
+      "backend_model": null
+    },
+    {
+      "scenario": "ivr-change",
+      "passed": false,
+      "issues": [
+        "hangup_arguments_mismatch",
+        "dtmf_sequence_mismatch",
+        "nonterminal_hangup",
+        "session_error"
+      ],
+      "dtmf_digits": [],
+      "hangup_attempts": 1,
+      "real_calls": 0,
+      "source_sha256": "784ff1e67ca523437636d8d87f452570e19a126248843fd6edf8f99ef3f0096c",
+      "assistant_version": null,
+      "backend_model": null
+    },
+    {
+      "scenario": "ivr-multilevel",
+      "passed": false,
+      "issues": [
+        "dtmf_sequence_mismatch",
+        "menu_sequence_incomplete",
+        "nonterminal_hangup",
+        "session_error"
+      ],
+      "dtmf_digits": [],
+      "hangup_attempts": 1,
+      "real_calls": 0,
+      "source_sha256": "de60effd39bfd2f3e5f6d8ba8a082a3491b8fb9b08b7471f71674e4b783df245",
+      "assistant_version": null,
+      "backend_model": null
+    },
+    {
+      "scenario": "ivr-repeat",
+      "passed": false,
+      "issues": [
+        "dtmf_sequence_mismatch",
+        "menu_sequence_incomplete",
+        "farewell_not_established",
+        "assistant_audio_queue_not_drained",
+        "hangup_before_completed_farewell_response"
+      ],
+      "dtmf_digits": [],
+      "hangup_attempts": 1,
+      "real_calls": 0,
+      "source_sha256": "ff9df4a5dd11ef8f43047c80938c9e380b23df7c862cb82f8438ecc88a65f535",
+      "assistant_version": null,
+      "backend_model": null
+    },
+    {
+      "scenario": "confirmed",
+      "passed": false,
+      "issues": [
+        "terminal_not_closed_once",
+        "hangup_before_completed_farewell_response"
+      ],
+      "dtmf_digits": [],
+      "hangup_attempts": 0,
+      "real_calls": 0,
+      "source_sha256": "935511615547c8eddd82560a3efc9a34215b9434200e11f545fc3991eb4dcc56",
+      "assistant_version": null,
+      "backend_model": null
+    },
+    {
+      "scenario": "hold-control",
+      "passed": true,
+      "issues": [],
+      "dtmf_digits": [],
+      "hangup_attempts": 0,
+      "real_calls": 0,
+      "source_sha256": "208abb27e9cc72c52df1993c1b5425b7f03a08cc794f5a17a34d13437f530a8b",
+      "assistant_version": null,
+      "backend_model": null
+    },
+    {
+      "scenario": "new-question",
+      "passed": true,
+      "issues": [],
+      "dtmf_digits": [],
+      "hangup_attempts": 0,
+      "real_calls": 0,
+      "source_sha256": "5fc1a34a3e80d6d3c8a25a38cb317aa22abe533afbc93961adf61a6487a8e723",
+      "assistant_version": null,
+      "backend_model": null
+    },
+    {
+      "scenario": "refused",
+      "passed": false,
+      "issues": [
+        "assistant_audio_queue_not_drained",
+        "hangup_before_completed_farewell_response"
+      ],
+      "dtmf_digits": [],
+      "hangup_attempts": 1,
+      "real_calls": 0,
+      "source_sha256": "8255741aebba903241ba13b13c231cf48c7590fc5c04ef5931f444639314889c",
+      "assistant_version": null,
+      "backend_model": null
+    },
+    {
+      "scenario": "wrong-number",
+      "passed": false,
+      "issues": [
+        "farewell_not_established",
+        "assistant_audio_queue_not_drained",
+        "hangup_before_completed_farewell_response"
+      ],
+      "dtmf_digits": [],
+      "hangup_attempts": 1,
+      "real_calls": 0,
+      "source_sha256": "8f55c9a9ac61be8fc589347135f5782b7d257433c692ceaf7dc766b8ddabb4f6",
+      "assistant_version": null,
+      "backend_model": null
+    }
+  ]
+}

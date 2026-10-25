@@ -10,13 +10,6 @@ export function outboundTools() {
       },
     },
     { type: "send_dtmf", send_dtmf: {} },
-    {
-      type: "skip_turn",
-      skip_turn: {
-        description:
-          "Wait silently ONLY during an unfinished outbound IVR menu or requested hold. Never substitute waiting for sending an already selected digit.",
-      },
-    },
   ];
 }
 export function outboundDelegation(base) {

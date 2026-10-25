@@ -11,6 +11,7 @@ import {
 import { resolve, join } from "node:path";
 import assert from "node:assert/strict";
 const source = process.argv[2];
+const guarded = process.argv.includes("--guarded");
 if (!source)
   throw new Error(
     "Usage: node scripts/test-phone-contract.mjs /private/path/worker.js",
@@ -21,6 +22,7 @@ const temp = mkdtempSync(resolve(".wrangler/phone-contract-"));
 const guard = `const fetch = async (url, options) => {
  if (new URL(url).hostname !== 'api.telnyx.com') throw new Error('NETWORK_DISABLED');
  if (options?.method !== 'POST') throw new Error('NETWORK_DISABLED');
+ if(new URL(url).pathname === '/v2/calls') {const payload=JSON.parse(options.body);if(!payload.connection_id||payload.time_limit_secs!==300)throw new Error('INVALID_GUARDED_PAYLOAD');return Response.json({data:{call_control_id:'local-test-call'}})}
  return Response.json({call_sid:'local-test-call'});
 };\n`;
 writeFileSync(
@@ -28,8 +30,18 @@ writeFileSync(
   guard + readFileSync(resolve(source), "utf8"),
   { mode: 0o600 },
 );
+writeFileSync(
+  join(temp, "voice.mjs"),
+  `export default {async fetch(request){const b=await request.json();if(b.destination==="+819099999999")return Response.json({error:"unavailable"},{status:503});return Response.json({endpoint:"https://api.telnyx.com/v2/calls",payload:{from:b.from,to:b.destination,command_id:b.request_id,time_limit_secs:300,connection_id:"local-app",stream_url:"wss://local.invalid"}})}}`,
+);
 const harness = createTestHarness({
   workers: [
+    {
+      config: {
+        name: "offline-voice-controller",
+        main: join(temp, "voice.mjs"),
+      },
+    },
     {
       config: {
         name: "offline-phone-contract",
@@ -42,7 +54,14 @@ const harness = createTestHarness({
             database_id: "00000000-0000-4000-8000-000000000001",
           },
         ],
+        services: [
+          { binding: "VOICE_CONTROL", service: "offline-voice-controller" },
+        ],
         vars: {
+          OUTBOUND_VOICE_MODE: guarded ? "guarded_jp" : "legacy",
+          OUTBOUND_VOICE_APP_ID: "local-app",
+          OUTBOUND_VOICE_ORIGIN: "https://local.invalid",
+          VOICE_CONTROL_API_SECRET: "local-voice-control-secret-32-characters",
           OUTBOUND_API_SECRET: "test-only-creation-secret-32-characters",
           OUTBOUND_APPROVAL_SECRET: "test-only-approval-secret-32-characters",
           TELNYX_API_KEY: "test-only-provider-key",
@@ -75,12 +94,12 @@ try {
     assert.deepEqual(a, b);
     checks++;
   };
-  const create = async () => {
+  const create = async (destination = "+819012345678") => {
     const r = await call(
       "/outbound/requests",
       {
-        destination_number: "+819012345678",
-        language: "it",
+        destination_number: destination,
+        language: guarded ? "ja" : "it",
         instructions: "Offline contract test: never contact any real provider.",
       },
       "test-only-creation-secret-32-characters",
@@ -205,10 +224,22 @@ try {
   );
   eq((await row(second)).status, "failed");
   eq((await row(second)).last_error, "busy");
+  if (guarded) {
+    const rejected = await create("+819099999999");
+    const result = await call(
+      "/outbound/requests/" + rejected + "/approve",
+      {},
+      "test-only-approval-secret-32-characters",
+    );
+    eq(result.status, 503);
+    eq((await row(rejected)).status, "failed");
+    eq((await row(rejected)).last_error, "voice_controller_unavailable");
+  }
   console.log(
     JSON.stringify({
       checks,
       passed: true,
+      guarded_route: guarded,
       network: "blocked; Telnyx transport replaced with local response",
       production_writes: 0,
     }),

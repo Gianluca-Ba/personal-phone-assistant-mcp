@@ -1,0 +1,2 @@
+# Exact, sanitized source snapshot consumed by the fail-closed production patcher.
+tests/fixtures/phone-outbound.original.mjs

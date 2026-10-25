@@ -7,9 +7,9 @@
     "node": ">=22"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.tests.json",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.tests.json && tsc --noEmit -p tsconfig.voice.json",
     "test": "vitest run",
-    "build": "wrangler deploy --dry-run --config workers/auth/wrangler.jsonc && wrangler deploy --dry-run --config workers/mcp/wrangler.jsonc",
+    "build": "wrangler deploy --dry-run --config workers/auth/wrangler.jsonc && wrangler deploy --dry-run --config workers/mcp/wrangler.jsonc && wrangler deploy --dry-run --config workers/voice/wrangler.jsonc",
     "deploy:auth": "wrangler deploy --config workers/auth/wrangler.jsonc",
     "deploy:mcp": "wrangler deploy --config workers/mcp/wrangler.jsonc",
     "configure": "node scripts/configure.mjs",
@@ -17,7 +17,8 @@
     "predeploy:mcp": "node scripts/preflight.mjs",
     "deploy:bootstrap": "node scripts/bootstrap.mjs",
     "format": "prettier --write workers tests scripts *.json .github/workflows/*.yml README.md",
-    "smoke:live": "node scripts/smoke-live.mjs"
+    "smoke:live": "node scripts/smoke-live.mjs",
+    "test:phone-voice": "node scripts/verify-phone-voice.mjs"
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "1.2.4",

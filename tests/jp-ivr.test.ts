@@ -38,11 +38,7 @@ it("builds separate native tools without copying shared identifiers or changing 
     new URL("../scripts/jp-ivr-tools.mjs", import.meta.url).href
   );
   const first = outboundTools();
-  expect(first.map((t: any) => t.type)).toEqual([
-    "hangup",
-    "send_dtmf",
-    "skip_turn",
-  ]);
+  expect(first.map((t: any) => t.type)).toEqual(["hangup", "send_dtmf"]);
   expect(first[1]).toEqual({ type: "send_dtmf", send_dtmf: {} });
   first[1].send_dtmf.unwanted = true;
   expect(outboundTools()[1].send_dtmf).toEqual({});

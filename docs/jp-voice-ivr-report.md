@@ -1,80 +1,96 @@
-# Japanese voice, end-of-call and IVR candidate — 2026-10-25
+# Japanese outbound IVR, closing and tone — 2026-10-25
 
-## Deployment status
+## Production deployment
 
-**Staged in isolated Telnyx assistants only. Not enabled on the production assistant.** No new real calls, phone Worker, MCP/Auth deployment, Telnyx number routing or credentials were changed. The production main version remains `20261024T130211034323`. Configuration acceptance is not functional validation.
+The dedicated Japanese outbound path is deployed. No real phone calls were made during development or validation. PSTN tone delivery, remote menu acceptance, real acoustic echo and real-world latency still require an explicitly approved pilot.
 
-The candidate includes a real native `send_dtmf` tool (not spoken digits), `skip_turn` for listening and `hangup` for actual termination, with a delegated tool backend. The original complete configuration and ten historical versions are saved locally under the ignored `.wrangler/jp-voice/api-before/`. No recordings, raw transcripts, appointment details or credentials are published.
+- Phone Worker `personal-phone-assistant`: `59608ee5-b091-4076-858a-e9f6d43274a0`.
+- New controller Worker `personal-phone-assistant-voice`: `ed13caaf-ea3d-476c-8ca8-7ef68897b38a`; health ready, `pstn_pilot_verified=false`.
+- Dedicated outbound assistant: `assistant-101aabf8-c364-4913-8e6f-05eaee622662`, initial version `20261025T054758636339`.
+- New Call Control application `3078297013335361153`, active, one outbound channel. Existing voice profile reused without changing its settings. No phone numbers reassigned.
+- Separate outbound insight group; existing insight definitions reused, existing inbound group unchanged. Authenticated summaries are forwarded to the existing phone summary handler only after binding a real call.
+- MCP/Auth unchanged. OAuth scopes, immutable request, explicit conversational approval policy, expiry, anti-replay, destination policy, idempotency and rate limits unchanged. Conversational approval is not independently cryptographically attested by the backend.
 
-## Effective configuration and candidate
+Routing is explicitly limited to existing approved requests with language `ja`. Other languages retain the legacy path. The new path fails closed if prewarming/configuration checks fail; it does not silently fall back to unguarded native actions.
 
-| Setting                           | Production                                                      | Candidate in isolated lab                                           |
-| --------------------------------- | --------------------------------------------------------------- | ------------------------------------------------------------------- |
-| Speech model / voice              | `openai/gpt-live-1` / `OpenAILive.marin`                        | Same                                                                |
-| Runtime turn detector             | `server_vad` reported by WebSocket                              | Same                                                                |
-| Configured transcription          | Deepgram Flux, auto language; EOT .8, timeout 5000 ms, eager .8 | Same                                                                |
-| Interruption                      | enabled; prediction threshold .55                               | .55 retained                                                        |
-| Start-speaking wait / endpointing | .1 seconds                                                      | Unchanged                                                           |
-| Delegation                        | disabled                                                        | enabled, existing `zai-org/GLM-5.3-Flash`, silent results           |
-| Tools                             | shared generic hangup                                           | Separate inline hangup, send_dtmf, skip_turn; shared tool untouched |
-| Legacy expressive_mode            | true, incompatible with current Marin API validation            | false; same normalization for both voice comparison arms            |
-| Recording / routing               | Production configuration                                        | Disabled / no phone application in lab                              |
+## Why a separate outbound audio path
 
-GPT Live requires delegation for tool execution ([Telnyx delegation](https://developers.telnyx.com/docs/inference/ai-assistants/delegation)). The native tool types are specified in the [official SDK schema](https://github.com/team-telnyx/telnyx-python/blob/master/src/telnyx/types/ai/assistant_tool.py). No unsupported VAD knobs or hangup delay fields were invented. Configured STT/endpointing fields must not be assumed to control the native speech model's runtime VAD.
+Native tool experiments observed a `hangup` invocation carrying `digits`, missed DTMF, and early closure. These are observed runtime contract failures, not a proven diagnosis of the provider's internal implementation. Tightening prompts and changing delegated models did not establish safety. Native interruption suppression also delayed meaningful recipient interruptions.
 
-## IVR behavior implemented in candidate
+The replacement uses three named client-side tools (`read_current_menu`, `press_ivr_digit`, `finish_call_after_goodbye`) and a server-owned Call Control/media bridge. Native hangup/send_dtmf tools are absent. Telnyx documents that Call Control and TeXML should not be mixed on the same call, hence the new outbound-only application. The original shared GPT Live/Marin assistant remains unchanged, including its main version `20261024T130211034323`.
 
-Listen to a complete menu; choose only an advertised option relevant to the authorized task; execute the native tone tool once; wait for the next menu. Stop tones when a human answers. No guessed extensions, automatic zero, payment, PIN, password or OTP entry. Remote prompts cannot expand authorization. A completed tool does not prove that the remote IVR accepted it.
+| Setting               | Existing shared assistant                   | Dedicated Japanese outbound                                          |
+| --------------------- | ------------------------------------------- | -------------------------------------------------------------------- |
+| Model / voice         | `openai/gpt-live-1` / Marin                 | `openai/gpt-4.1` / hosted Japanese Rina Ultra                        |
+| Recipient recognition | native voice stack                          | separate Deepgram `flux-multi`, Japanese, PCMU 8 kHz                 |
+| End of turn           | configured .8 / 5000 ms; runtime native VAD | .8 / 2000 ms on the separate STT connection                          |
+| Interruptions         | native enabled .55                          | native disabled; server classifies actual recipient turns            |
+| Audio transport       | TeXML-managed                               | dedicated Call Control, bidirectional PCMU media                     |
+| Closing               | native generic tool                         | actual media marks or matching completed Speak webhook before hangup |
 
-The assistant instructions limit navigation to five selections and one explicitly requested retry per selection. Repeated menus, ambiguity and missing relevant options produce an unresolved outcome followed by the closing procedure. **These limits are model instructions, not independent server counters.** OAuth, owner approval, immutable outbound requests, expiry, anti-replay, idempotency and initiation rate limiting remain unchanged; none authorizes menu-initiated extra calls.
+Flux (without `-multi`) is English-only; it was not used for Japanese in the final bridge. STT finals are deduplicated by provider request/turn ID, including Telnyx's normalized duplicate messages. Brief overlapping listening signals are not injected as new user instructions; real requests can cancel playback. This remains a heuristic, not perfect Japanese intent recognition.
 
-Permanent instructions contain no appointment-specific details. Name introduction follows the task, with truthful AI disclosure if asked. Japanese utterances are brief, one question at a time, and use either 18時 or 午後6時. Listening signals are distinguished from real questions contextually, without claiming that prompt text can override every VAD cancellation.
+## Enforced IVR and closing controls
 
-Closing distinguishes task outcome from call termination: settle essential facts, wait for the recipient's complete final turn, say the complete farewell, then execute hangup without requiring another turn. Holds and new questions suspend closing. Refusal, wrong number and inability to proceed remain failures in the summary, not successful bookings.
+The controller accepts only an advertised single digit from the completed current transcript, bound to a one-use menu token. It reserves each operation before sending it. Maximum five selections and one explicitly requested retry are server counters, not only prompt instructions. Ambiguous recognition is rejected: a synthetic `二` was once recognized as `見`; no digit was guessed. PINs, OTPs, identifiers, account details and payment selections are rejected. These lexical controls are conservative and do not constitute semantic verification of every possible IVR prompt.
 
-## Measurements and release blockers
+The authenticated phone service registers only an existing D1 row already in `dialing`, with matching callback token, destination and configured caller. The controller reads instructions from D1, fingerprints the snapshot and returns a bounded dial contract. It cannot dial itself. Its service secret is separate from the existing creation, approval and owner-login secrets.
 
-Historical first-call transport events show answer-to-RTP 266 ms and answer-to-playback-engine start 282 ms. Those are not first-word or model inference latency. Transcript segmentation and 200 ms alignment are insufficient evidence of actual audible interruptions. Per-turn model/playback-cut events were unavailable for that PSTN call.
+Media upgrades require Telnyx Ed25519 signatures over the exact configured WebSocket URL, timestamp checks and a one-use stream nonce. Webhooks require signed raw bodies, the expected application/call/request/nonce, and deduplicated event IDs. Provider commands are durably reserved, have deterministic command IDs, and uncertain results are not blindly retried.
 
-The reproducible voice corpus contains 30 clips / two synthetic Japanese speakers, 89.17 seconds. A final virtual comparison used 16 real Telnyx WebSocket sessions:
+A task outcome and a call ending are distinct. Closing waits for the recipient's final turn and queued audio. Telnyx media marks prove queue playback; marks echoed by `clear` are invalidated first. If no already-played farewell exists, the controller plays one fixed Japanese farewell and waits for its matching signed `call.speak.ended` with completed status. Questions/holds suspend closing; a cancelled farewell's delayed completion cannot authorize hangup. Technical failures use a separate apology/fallback. A five-minute dial limit bounds failures. Actual carrier hangs up are translated to the existing status callback contract; ending a call does not prove the task succeeded.
 
-| Observation                                               | Normalized baseline (8) | Candidate (8) |
-| --------------------------------------------------------- | ----------------------: | ------------: |
-| Outbound output containing owner name                     |                     4/6 |           0/6 |
-| Valid overlapping aizuchi trials with server cancellation |                     2/2 |           1/1 |
-| Genuine interruption trials with server cancellation      |                     4/4 |           4/4 |
-| Client PCM-end to next audio, median                      |                570.6 ms |      560.9 ms |
-| Same measurement, p95                                     |               1124.8 ms |     1081.5 ms |
-| Session errors                                            |                       0 |             0 |
+## Reproducible results
 
-Small samples and different valid overlap counts prohibit a latency-improvement or aizuchi-fix claim. These are client-observed virtual audio timings, not PSTN or model-only latency. A .7 interruption-threshold experiment did not resolve cancellations and was rejected; .55 is retained. Two inbound controls per arm are insufficient for full production regression approval.
+90 automated tests passed, including concurrent duplicate commands, changed command bodies, one-use media claims, signed context, duplicate callbacks, actual playback gating and cancelled farewell callbacks. Both legacy (24) and guarded (29) offline phone-contract checks passed with network blocked and zero production writes. Type checking, three Worker dry builds and production dependency audit passed (zero vulnerabilities).
 
-The initial closing test invoked native hangup and closed the virtual connection; a hold control remained open. However, the estimated audio queue still contained approximately 25 ms at closure and the farewell transcript was fragmented. A reduced diagnostic also closed about 68 ms before estimated queue drain. No guarantee of a fully audible farewell has been established. A global short idle timeout was deliberately avoided because legitimate holds must remain possible.
+Six final virtual scenarios used real Telnyx AI and STT WebSockets with synthetic Japanese speech. The phone leg, DTMF, Speak, playback acknowledgements and hangup were mocked; no dial API was reachable. All six passed. Sanitized results: `voice/jp/bridge-results-2026-10-25.json`.
 
-IVR single-menu tests invoked skip_turn instead of send_dtmf despite the correct routing intent. Tightening the prompt did not establish actual DTMF execution. No-option and sensitive-PIN tests emitted no DTMF, but did not complete the desired automatic closing either. A minimal diagnostic also failed to establish DTMF. The multilevel trial emitted no DTMF and never reached its second menu. Multilevel and repeat fixtures plus a follow-up-on-success audio harness are supplied; unmet tool preconditions are failures, not passes. WebSocket virtual tests do not establish PSTN tone delivery or remote menu acceptance.
+| Scenario               | Observed tones | End behavior                             | Total scenario time |
+| ---------------------- | -------------- | ---------------------------------------- | ------------------: |
+| Single menu            | 2              | completed controlled closure             |              21.3 s |
+| Two levels             | 2 → 3          | completed controlled closure             |              29.5 s |
+| Explicit repeated menu | 2 → 2          | no third tone; closure                   |              28.5 s |
+| Sensitive PIN          | none           | unable to proceed; closure               |              54.5 s |
+| Overlapping はい       | none           | no playback clear/cancellation           |  27.8 s observation |
+| Actual wait request    | none           | playback cancelled; no premature closure |  28.5 s observation |
 
-The repeated-menu trial did execute native `send_dtmf` twice with `{"digits":"2"}`, both successful. This establishes a real tool path in the virtual environment, not PSTN delivery. However, the third menu was still playing when native hangup closed the session: this is a failed closing-safety trial. Sanitized per-run evidence is in `voice/jp/ivr-results-2026-10-25.json`.
+Observation-only scenarios intentionally end by harness timeout; this is not a live-call failure. Total durations are not model latency. The slow PIN case remains a latency limitation. Real PSTN delivery and callback timing were not tested.
 
-**Release remains blocked on reliable IVR sequencing, complete recipient/farewell playback and inbound regression.** The production apply script refuses deployment without a separate positive release-validation record tied to the candidate hash and baseline version. No such record has been fabricated. Snapshot availability was verified; actual production rollback has not been exercised because production was not changed.
+Earlier native voice comparisons (16 virtual sessions) measured PCM-end-to-next-audio median 570.6 vs 560.9 ms and p95 1124.8 vs 1081.5 ms, with unequal small samples. They do not establish a latency improvement for this replacement architecture. Historical answer-to-RTP 266 ms and playback-engine start 282 ms are transport measurements, not model inference time. The original dentist transcript alone cannot establish audible interruptions.
+
+## Tone and task separation
+
+`voice/jp/guarded-outbound-prompt.txt` is permanent outbound-only policy. Only `outbound_task` carries per-call instructions. It requires short natural telephone Japanese, one question at a time, no repetitive confirmations, 18時/午後6時 rather than 午後18時, no volunteered owner name, and truthful disclosure of automation if asked. No inbound greeting is inherited. Recipient/IVR content cannot expand the owner's task or authorize fees, payments or booking changes.
 
 ## Reproduction and rollback
 
-Use Node 22. Local `.dev.vars.voice` must remain ignored and private. Never paste keys or raw logs into a public issue.
+Node 22; keep local credentials and raw synthetic traces ignored/private:
 
 ```sh
 npm ci
 npm run typecheck
 npm test
+npm run test:phone-voice
 npm run build
-node scripts/jp-voice-corpus.mjs
-node --env-file=.dev.vars.voice scripts/jp-voice-lab.mjs
-node --env-file=.dev.vars.voice scripts/jp-voice-simulate.mjs aizuchi-hai,stop-request,automation-identity,inbound-control both virtual-release-validation
-node --env-file=.dev.vars.voice scripts/jp-end-call-lab.mjs
-JP_SCENARIOS_FILE=voice/jp/ivr-scenarios.json node --env-file=.dev.vars.voice scripts/jp-end-call-simulate.mjs ivr-new-run ivr-change,ivr-no-option,ivr-sensitive,ivr-multilevel,ivr-repeat
-node --env-file=.dev.vars.voice scripts/jp-voice-config.mjs plan
-node --env-file=.dev.vars.voice scripts/jp-voice-config.mjs verify-rollback-route
+npm audit --omit=dev
+JP_EXTERNAL_STT=true JP_CONTROLLED_FAREWELL=true node --env-file=.dev.vars.voice scripts/jp-voice-bridge-lab.mjs fresh-bridge-run
 ```
 
-Run folders are cached; choose a new name for a fresh experiment. Inspect recorded native tool name, arguments, result and remaining follow-up menus, rather than accepting the assistant's verbal assertion. Virtual tests may incur AI usage charges, but have no PSTN initiation path.
+The virtual harness requires an isolated lab assistant configuration under `.wrangler/jp-voice/`; never point it at the production assistant. It refuses recording, phone-app binding, insights or native tools. AI/STT usage may incur charges, but no actual phone call can be initiated.
 
-If a future validated release is applied, `node --env-file=.dev.vars.voice scripts/jp-voice-config.mjs rollback` promotes the saved original main version and verifies the prompt and voice readback. Preserve the private snapshot separately: Telnyx retains a limited number of versions. No Cloudflare deployment is required for assistant-only configuration changes.
+Private originals/configuration/deployment snapshots are in ignored `.wrangler/phone-before/` and `.wrangler/jp-voice/api-before/`. The phone patch changes only `approveOutboundRequest`; protected prefix/suffix and the authorization guard are byte-identical before bundling. The deployed bundle was downloaded and matched the local build; all original bindings were checked preserved. No D1 schema changes.
+
+Original source SHA256: `1e5aaa2653d16c381b2c0fba268f8f4bb6b67b6790cdb4eb6f3c66739e31c010`; patched source: `e9e542d3e7c4583a7b009e68d069d880e28e6e0fadb88874b52a6bc756efcc3c`.
+
+Rollback: restore the prior phone deployment from the private `pre-deployments.json` snapshot, or deploy the saved original phone source/settings. This disconnects the new path without changing inbound routing or the original assistant. Disable the newly created outbound application after active sessions drain; leave old app/profile/number assignments untouched. Keep the controller available for delayed callbacks. Original assistant rollback availability was verified with a no-op read; rollback was not exercised on live production.
+
+First approved pilot: ask ChatGPT to prepare a Japanese test call to an IVR number you control, specify the permitted menu goal and no payments/booking changes, inspect the request, then explicitly approve that exact request in a new message. Do not treat this report as approval for a phone call.
+
+## Primary references
+
+- [Telnyx realtime conversations](https://developers.telnyx.com/docs/inference/ai-assistants/realtime-conversations)
+- [Media streaming, signatures, marks and clear](https://developers.telnyx.com/docs/voice/programmable-voice/media-streaming)
+- [STT engines and models](https://developers.telnyx.com/docs/voice/stt/websocket-streaming/parameters/engines-and-models)
+- [STT end of turn](https://developers.telnyx.com/docs/voice/stt/websocket-streaming/parameters/end-of-turn)
+- [TeXML and Voice API compatibility](https://support.telnyx.com/en/articles/8118086-texml-and-telnyx-voice-api-compatibility)

@@ -1,15 +1,25 @@
 // Audio-only virtual test of the native hangup path; no public phone numbers.
+import { CallController } from "./jp-call-controller.mjs";
+import { evaluateRun, evaluateGuardedRun } from "./jp-voice-verdict.mjs";
+import { PlaybackClock } from "./jp-playback-clock.mjs";
 import { dtmfAttempts } from "./jp-ivr-tools.mjs";
 import WebSocket from "ws";
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
+const variant = process.env.JP_LAB_VARIANT ?? "endcall";
+if (!/^[a-z0-9-]+$/.test(variant)) throw new Error("Invalid lab variant");
 const root = ".wrangler/jp-voice";
-const config = JSON.parse(readFileSync(root + "/lab-endcall.json", "utf8"));
+const config = JSON.parse(
+  readFileSync(root + "/lab-" + variant + ".json", "utf8"),
+);
 if (
   config.telephony_settings.default_texml_app_id ||
   config.tools.some(
-    (t) => !["hangup", "send_dtmf", "skip_turn"].includes(t.type),
+    (t) =>
+      !["hangup", "send_dtmf", "skip_turn", "client_side_tool"].includes(
+        t.type,
+      ),
   )
 )
   throw new Error("Isolated end-call assistant required");
@@ -72,13 +82,41 @@ for (const s of cases.filter((s) => selected.includes(s.id))) {
       offset = 0,
       inputEnd = null,
       clientClosed = false,
-      playbackEnd = 0,
-      closeTimer;
+      playback = new PlaybackClock(),
+      closeTimer,
+      closedByController = false;
     const now = () => performance.now() - start;
     const record = (e) => events.push({ at_ms: now(), ...e });
     const ws = new WebSocket(
       `wss://api.telnyx.com/v2/ai/assistants/${config.id}/conversation?input_sample_rate=16000`,
       { headers: { Authorization: "Bearer " + process.env.TELNYX_API_KEY } },
+    );
+    const controller = new CallController({
+      requirePlaybackAck: false, // Isolated virtual PCM player only; never a PSTN playback claim.
+      now,
+      sendDigit: async (digits) => {
+        record({ type: "controller.virtual_dtmf", digits });
+        if (clips.length) {
+          audio = clips.shift();
+          offset = 0;
+          inputEnd = null;
+          record({ type: "next_virtual_menu" });
+        }
+        return { ok: true, simulated: true, remote_acceptance_verified: false };
+      },
+      close: async (outcome) => {
+        record({ type: "controller.virtual_close", outcome });
+        if (ws.readyState === WebSocket.OPEN)
+          ws.send(JSON.stringify({ type: "response.cancel" }));
+        closedByController = true;
+        clientClosed = true;
+        ws.close();
+        closeTimer = setTimeout(() => ws.terminate(), 2000);
+      },
+    });
+    const controllerTimer = setInterval(
+      () => controller.tick().catch(() => record({ type: "controller_error" })),
+      50,
     );
     const timer = setTimeout(() => {
       clientClosed = true;
@@ -106,6 +144,39 @@ for (const s of cases.filter((s) => selected.includes(s.id))) {
     ws.on("message", (raw) => {
       const m = JSON.parse(raw.toString());
       const rid = m.response_id ?? m.response?.id;
+      controller.event(m);
+      if (
+        m.type === "conversation.item.created" &&
+        m.item?.type === "function_call"
+      ) {
+        record(m);
+        let args;
+        try {
+          args = JSON.parse(m.item.arguments);
+        } catch {
+          args = null;
+        }
+        controller.command(m.item.call_id, m.item.name, args).then((result) => {
+          record({ type: "controller.tool_result", name: m.item.name, result });
+          if (
+            m.item.name === "finish_call_after_goodbye" &&
+            result.ok &&
+            controller.farewell
+          )
+            return;
+          if (ws.readyState === WebSocket.OPEN)
+            ws.send(
+              JSON.stringify({
+                type: "conversation.item.create",
+                item: {
+                  type: "function_call_output",
+                  call_id: m.item.call_id,
+                  output: JSON.stringify(result),
+                },
+              }),
+            );
+        });
+      }
       if (m.type === "session.created") {
         record({ type: m.type, audio: m.session?.audio });
         started = true;
@@ -139,7 +210,12 @@ for (const s of cases.filter((s) => selected.includes(s.id))) {
         const rate =
           events.find((e) => e.type === "session.created")?.audio.output.format
             .rate ?? 16000;
-        playbackEnd = Math.max(playbackEnd, now()) + (b / (rate * 2)) * 1000;
+        if (controller.closed || controller.closing) {
+          record({ type: "audio_discarded_after_controlled_close", bytes: b });
+          return;
+        }
+        playback.append(b, rate, now());
+        controller.event({ type: "assistant_audio", bytes: b, rate });
         const r = responses.get(rid);
         if (r) {
           r.bytes += b;
@@ -155,6 +231,14 @@ for (const s of cases.filter((s) => selected.includes(s.id))) {
         if (r) r.text += m.delta ?? "";
       } else {
         record(m);
+        if (m.type === "input_audio_buffer.speech_started") {
+          playback.clear(now());
+          controller.event({ type: "response.cancelled" });
+        }
+        if (m.type === "response.done" && m.response?.status === "cancelled") {
+          playback.clear(now());
+          controller.event({ type: "response.cancelled" });
+        }
         if (
           m.type === "response.tool_call.completed" &&
           /dtmf/i.test(m.tool_call?.name ?? "") &&
@@ -171,6 +255,8 @@ for (const s of cases.filter((s) => selected.includes(s.id))) {
           if (r) {
             r.status = m.response?.status;
             r.done_ms = now();
+            if (r.status === "completed")
+              controller.event({ type: "assistant_completed", text: r.text });
           }
         }
       }
@@ -180,6 +266,7 @@ for (const s of cases.filter((s) => selected.includes(s.id))) {
       clearTimeout(timer);
       clearTimeout(closeTimer);
       clearInterval(sender);
+      clearInterval(controllerTimer);
       const at = now();
       record({
         type: "socket_closed",
@@ -190,12 +277,26 @@ for (const s of cases.filter((s) => selected.includes(s.id))) {
       const text = [...responses.values()].map((r) => r.text).join("\n");
       const summary = {
         scenario: s.id,
+        assistant_version: config.version_id,
+        model: config.model,
+        voice: config.voice_settings.voice,
+        delegation_enabled: config.delegation_settings?.enabled,
+        backend_model: config.delegation_settings?.enabled
+          ? config.delegation_settings.model
+          : null,
+        configured_tools: config.tools.map((t) => t.type),
+        audio_queue_model:
+          "PCM16; cleared on native barge-in/cancel; estimated, not PSTN playback",
         terminal: s.terminal,
         session_started: started,
+        closed_by_controller: closedByController,
+        virtual_dtmf_digits: events
+          .filter((e) => e.type === "controller.virtual_dtmf")
+          .map((e) => e.digits),
         closed_by_server: !clientClosed && code === 1000,
         caller_finished_before_close: inputEnd !== null && at >= inputEnd,
-        virtual_audio_drained_before_close: at >= playbackEnd,
-        close_minus_virtual_playback_end_ms: at - playbackEnd,
+        virtual_audio_drained_before_close: playback.remaining(at) === 0,
+        close_minus_virtual_playback_end_ms: at - playback.end,
         farewell_in_output: /失礼(?:いた)?します|失礼いたします/.test(text),
         tool_events: events
           .filter((e) => /delegation|function_call|tool/i.test(e.type))
@@ -211,6 +312,9 @@ for (const s of cases.filter((s) => selected.includes(s.id))) {
       resolve({ summary, events, responses: [...responses.values()] });
     });
   });
+  result.verdict = config.tools.every((t) => t.type === "client_side_tool")
+    ? evaluateGuardedRun(result, s)
+    : evaluateRun(result, s);
   writeFileSync(file, JSON.stringify(result, null, 2), { mode: 0o600 });
-  console.log(JSON.stringify(result.summary));
+  console.log(JSON.stringify({ ...result.summary, verdict: result.verdict }));
 }

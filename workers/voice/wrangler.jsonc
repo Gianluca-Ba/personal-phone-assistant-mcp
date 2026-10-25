@@ -1,0 +1,29 @@
+{
+  "name": "personal-phone-assistant-voice",
+  "main": "src/index.mjs",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "observability": { "enabled": false },
+  "durable_objects": {
+    "bindings": [{ "name": "VOICE_SESSIONS", "class_name": "VoiceSession" }],
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["VoiceSession"] }],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "phone-assistant-db",
+      "database_id": "f8604adb-ac12-4298-a9be-327727a20675",
+    },
+  ],
+  "services": [
+    { "binding": "PHONE_API", "service": "personal-phone-assistant" },
+  ],
+  "vars": {
+    "VOICE_EXECUTION_ENABLED": "false",
+    "PSTN_PILOT_VERIFIED": "false",
+    "VOICE_ORIGIN": "https://personal-phone-assistant-voice.barsaglini-gianluca.workers.dev",
+    "OUTBOUND_ASSISTANT_ID": "",
+    "VOICE_APP_ID": "",
+  },
+}
