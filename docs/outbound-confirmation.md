@@ -1,5 +1,7 @@
 # Conferma outbound: proprietà e limite del protocollo
 
+**Aggiornamento operativo:** la fase corrente abilita soltanto la preparazione e blocca esplicitamente l’approvazione. Vedi [sola creazione](creation-only.md). Gli esiti operativi precedenti riportati sotto sono storici.
+
 ## Decisione di rilascio
 
 Rimosso il flusso di approvazione via browser. `approve_outbound_request` non crea ticket o URL e non rimanda a una pagina. È dichiarato al client come tool con effetti potenzialmente irreversibili (`readOnlyHint=false`, `destructiveHint=true`, `openWorldHint=true`). La descrizione richiede presentazione dei dettagli e un nuovo messaggio esplicito del proprietario, prima della chiamata al tool.

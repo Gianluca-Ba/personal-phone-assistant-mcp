@@ -1,5 +1,7 @@
 # Diagnosi della riconnessione OAuth dalla chat
 
+**Aggiornamento operativo:** la fase corrente abilita soltanto la preparazione e blocca esplicitamente l’approvazione. Vedi [sola creazione](creation-only.md). Gli esiti operativi precedenti riportati sotto sono storici.
+
 ## Riproduzione e causa
 
 Dopo `e929422` il challenge `insufficient_scope` veniva riconosciuto: il client richiedeva `calls:read calls:write`. La riconnessione base dal pannello plugin poteva completarsi, mentre il percorso dalla chat falliva prima della pagina del secret.

@@ -1,16 +1,42 @@
 import { DurableObject } from "cloudflare:workers";
 import { z } from "zod";
 const number = z.string().regex(/^\+[1-9]\d{7,14}$/);
-const language = z.string().regex(/^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/);
+const language = z.enum(["auto", "ja", "it", "en", "pt"]);
+const canonicalInstructions = (input: { goal: string; instructions: string }) =>
+  `Goal: ${input.goal}\n\n${input.instructions}`;
+const creationBody = (input: {
+  destination: string;
+  language: string;
+  goal: string;
+  instructions: string;
+}) => ({
+  destination_number: input.destination,
+  language: input.language,
+  instructions: canonicalInstructions(input),
+});
 export const createInput = z
   .object({
     request_key: z.string().uuid(),
     destination: number,
     language,
-    goal: z.string().min(1).max(1000),
-    instructions: z.string().min(1).max(8000),
+    goal: z.string().trim().min(1).max(1000),
+    instructions: z.string().trim().min(1).max(3000),
   })
-  .strict();
+  .strict()
+  .refine((v) => canonicalInstructions(v).length <= 3000, {
+    message:
+      "Combined goal and instructions exceed the upstream 3000-character limit",
+    path: ["instructions"],
+  })
+  .refine(
+    (v) =>
+      new TextEncoder().encode(JSON.stringify(creationBody(v))).byteLength <=
+      8192,
+    {
+      message: "Upstream request body exceeds 8192 bytes",
+      path: ["instructions"],
+    },
+  );
 export const approveInput = z
   .object({
     id: z.string().uuid(),
@@ -33,10 +59,12 @@ export interface OutboundEnv {
   OUTBOUND_GATE: DurableObjectNamespace<OutboundGate>;
   OWNER_TOKEN_VERSION: string;
   OUTBOUND_ENABLED?: string;
+  OUTBOUND_EXECUTION_ENABLED?: string;
   OUTBOUND_CONTRACT_VERIFIED?: string;
   OUTBOUND_API_SECRET?: string;
   OUTBOUND_APPROVAL_SECRET?: string;
   OUTBOUND_ALLOWED_DESTINATIONS?: string;
+  OUTBOUND_ALLOWED_DESTINATIONS_SECRET?: string;
   OUTBOUND_RATE_LIMIT_PER_HOUR?: string;
 }
 export type Snapshot = z.infer<typeof approveInput> & {
@@ -75,7 +103,11 @@ export class OutboundGate extends DurableObject<OutboundEnv> {
       fail("NOT_AUTHORIZED");
   }
   private allowed(destination: string) {
-    const list = JSON.parse(this.env.OUTBOUND_ALLOWED_DESTINATIONS ?? "[]");
+    const list = JSON.parse(
+      this.env.OUTBOUND_ALLOWED_DESTINATIONS_SECRET ??
+        this.env.OUTBOUND_ALLOWED_DESTINATIONS ??
+        "[]",
+    );
     return (
       Array.isArray(list) &&
       list.every((v) => typeof v === "string") &&
@@ -136,7 +168,7 @@ export class OutboundGate extends DurableObject<OutboundEnv> {
     }
     try {
       await this.quota(p, "create");
-      const instructions = `Goal: ${input.goal}\n\n${input.instructions}`;
+      const instructions = canonicalInstructions(input);
       const response = await this.env.PHONE_API.fetch(
         production + "/outbound/requests",
         {
@@ -146,14 +178,20 @@ export class OutboundGate extends DurableObject<OutboundEnv> {
             Authorization: `Bearer ${this.env.OUTBOUND_API_SECRET}`,
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({
-            destination_number: input.destination,
-            language: input.language,
-            instructions,
-          }),
+          body: JSON.stringify(creationBody(input)),
           signal: AbortSignal.timeout(15000),
         },
       );
+      if ([400, 401, 413, 422].includes(response.status)) {
+        // Verified upstream rejects these before INSERT. The same key can be
+        // retried after fixing credentials/input; ambiguous outcomes stay locked.
+        await this.ctx.storage.delete("creation");
+        fail(
+          response.status === 401
+            ? "CREATION_CREDENTIAL_REJECTED"
+            : "CREATION_INPUT_REJECTED",
+        );
+      }
       if (!response.ok) fail("CREATION_OUTCOME_UNKNOWN");
       const payload = z
         .object({
@@ -280,6 +318,8 @@ export class OutboundGate extends DurableObject<OutboundEnv> {
   async approve(raw: z.infer<typeof approveInput>, p: Principal) {
     const input = approveInput.parse(raw);
     this.authorize(p, "calls:execute");
+    if (this.env.OUTBOUND_EXECUTION_ENABLED !== "true")
+      fail("OUTBOUND_APPROVAL_DISABLED");
     this.configured();
     const snapshot = await this.ctx.storage.get<Snapshot>("snapshot");
     if (!snapshot) fail("REQUEST_NOT_BOUND");

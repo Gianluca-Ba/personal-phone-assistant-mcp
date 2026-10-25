@@ -12,7 +12,7 @@ const resource =
 const report = {
   verified_at: new Date().toISOString(),
   resource,
-  outbound_enabled: false,
+  phone_calls_attempted: false,
   checks: {},
 };
 const request = (url, options = {}) =>
@@ -249,12 +249,9 @@ const check = async () => {
         outbound.every((row) => typeof row.phone === "string"),
         "Destination mapping missing",
       );
-    const noWrite = await rpc("tools/call", {
-      name: "create_outbound_request",
-      arguments: {},
-    }).catch(() => null);
-    assert.ok(noWrite === null || noWrite.isError);
-    report.checks.outbound_unavailable = true;
+    // Do not invoke an outbound tool with a read-only token: its legitimate
+    // step-up challenge would invalidate the grant we are testing for refresh.
+    report.checks.read_only_probe_did_not_invoke_outbound_tools = true;
     const refreshed = await request(discovery.token_endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },

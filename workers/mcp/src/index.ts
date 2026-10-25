@@ -213,7 +213,7 @@ function makeServer(env: Env, principal: Principal) {
       {
         ...oauthToolMetadata("approve_outbound_request"),
         description:
-          "Approve the EXACT immutable request only after a NEW explicit owner approval message. Native ChatGPT write confirmation must also be requested. Requires calls:execute. No links or browser approval. Real execution is denied unless the server has trusted action-bound human consent; OAuth, model arguments and metadata alone are insufficient.",
+          "Creation-only release: execution is disabled. Approve the EXACT immutable request only after a NEW explicit owner approval message. Native ChatGPT write confirmation must also be requested. Requires calls:execute. No links or browser approval. Real execution is denied unless the server has trusted action-bound human consent; OAuth, model arguments and metadata alone are insufficient.",
         inputSchema: approveInput,
         annotations: { ...writeAnnotations, destructiveHint: true },
       },

@@ -1,5 +1,7 @@
 # OAuth incrementale per ChatGPT
 
+**Aggiornamento operativo:** la fase corrente abilita soltanto la preparazione e blocca esplicitamente l’approvazione. Vedi [sola creazione](creation-only.md). Gli esiti operativi precedenti riportati sotto sono storici.
+
 **Aggiornamento:** il ciclo di refresh osservato dopo questo rilascio è stato corretto. Vedi [diagnosi e correzione della riconnessione dalla chat](oauth-reconnect-diagnosis.md). Il catalogo scope era corretto, ma serviva obbligare il client a ottenere un nuovo consenso invece di riutilizzare il vecchio grant.
 
 ## Problema e correzione

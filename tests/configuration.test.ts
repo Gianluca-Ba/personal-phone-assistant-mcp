@@ -46,6 +46,12 @@ it("configuration scripts accept JSONC, reject placeholders, and never target th
     );
     expect(configured.name).toBe("personal-phone-assistant-mcp");
     expect(configured.d1_databases[0].database_id).toBe("b".repeat(32));
+    configured.vars.OUTBOUND_EXECUTION_ENABLED = "true";
+    writeFileSync(
+      join(temp, "workers/mcp/wrangler.jsonc"),
+      JSON.stringify(configured),
+    );
+    expect(run("preflight.mjs").status).toBe(1);
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }

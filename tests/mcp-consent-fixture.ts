@@ -8,6 +8,9 @@ import {
   type Principal,
 } from "../workers/mcp/src/outbound";
 export class OutboundGate extends ProductionGate {
+  async setCreationTestSecret(secret: string) {
+    this.env.OUTBOUND_API_SECRET = secret;
+  }
   async installTestReceipt(invalid = false) {
     const s = await this.ctx.storage.get<Snapshot>("snapshot");
     if (!s) throw new Error("Missing test snapshot");

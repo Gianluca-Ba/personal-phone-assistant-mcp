@@ -15,6 +15,7 @@ const vars = {
   ...base.vars,
   SCHEMA_MAPPING: "",
   OUTBOUND_ENABLED: "true",
+  OUTBOUND_EXECUTION_ENABLED: "true",
   OUTBOUND_CONTRACT_VERIFIED: "true",
   OUTBOUND_ALLOWED_DESTINATIONS: '["+819012345678"]',
   OUTBOUND_RATE_LIMIT_PER_HOUR: "100",
@@ -38,6 +39,20 @@ const harness = createTestHarness({
     },
     {
       config: {
+        ...base,
+        name: "creation-only",
+        main: "tests/mcp-consent-fixture.ts",
+        vars: {
+          ...vars,
+          OUTBOUND_EXECUTION_ENABLED: "false",
+          OUTBOUND_APPROVAL_SECRET: "",
+          OUTBOUND_ALLOWED_DESTINATIONS: "[]",
+          OUTBOUND_ALLOWED_DESTINATIONS_SECRET: '["+819012345678"]',
+        },
+      },
+    },
+    {
+      config: {
         name: "gate-driver",
         main: "tests/gate-driver.ts",
         compatibility_date: "2026-10-01",
@@ -47,6 +62,11 @@ const harness = createTestHarness({
               name: "FIXTURE",
               class_name: "OutboundGate",
               script_name: "personal-phone-assistant-mcp",
+            },
+            {
+              name: "CREATION",
+              class_name: "OutboundGate",
+              script_name: "creation-only",
             },
             {
               name: "REAL",
@@ -90,7 +110,10 @@ const actor: Principal = {
 };
 let env: Awaited<ReturnType<typeof mcp.getEnv>>, realEnv: OutboundEnv;
 const driver = harness.getWorker("gate-driver");
-function stub(name: string, target: "fixture" | "real" = "fixture") {
+function stub(
+  name: string,
+  target: "fixture" | "real" | "create-only" = "fixture",
+) {
   return new Proxy(
     {},
     {
@@ -148,7 +171,7 @@ beforeAll(async () => {
   // Test-only secrets: no real API is reachable from this harness.
   // Inline config secret values are vars here and stay exclusively in this local runtime.
   await env.DB.exec(
-    "CREATE TABLE outbound_requests (id TEXT PRIMARY KEY,destination_number TEXT,instructions TEXT,language TEXT,status TEXT,created_at TEXT); CREATE TABLE mock_events (operation TEXT);",
+    "CREATE TABLE outbound_requests (id TEXT PRIMARY KEY,destination_number TEXT,instructions TEXT,language TEXT,status TEXT,created_at TEXT,authorized_at TEXT,telnyx_call_id TEXT); CREATE TABLE mock_events (operation TEXT);",
   );
 }, 60000);
 afterAll(() => harness.close());
@@ -666,4 +689,73 @@ it("official SDK opens fresh PKCE consent instead of looping on a read-only refr
     "pending_approval",
   );
   await transport.close();
+});
+
+it("creation-only mode reaches pending_approval and never approves even with a synthetic valid receipt", async () => {
+  const details = {
+    ...input(),
+    goal: "  Creation only test  ",
+    instructions: "  Prepare a request without originating a call.  ",
+  };
+  const c = stub(
+    `create:owner:test-client:${details.request_key}`,
+    "create-only",
+  );
+  const before = await stats();
+  const s = (await c.create(details, actor)) as Snapshot;
+  expect(s.state).toBe("pending_approval");
+  expect(s.instructions).toBe(
+    "Goal: Creation only test\n\nPrepare a request without originating a call.",
+  );
+  expect(await c.create(details, actor)).toMatchObject({
+    id: s.id,
+    state: "pending_approval",
+  });
+  const g = stub(`approval:${s.id}`, "create-only");
+  await g.installTestReceipt();
+  await expect(g.approve(approve(s), actor)).rejects.toThrow(
+    "OUTBOUND_APPROVAL_DISABLED",
+  );
+  const row = await env.DB.prepare(
+    "SELECT status,authorized_at,telnyx_call_id FROM outbound_requests WHERE id=?",
+  )
+    .bind(s.id)
+    .first();
+  expect(row).toEqual({
+    status: "pending_approval",
+    authorized_at: null,
+    telnyx_call_id: null,
+  });
+  const after = await stats();
+  expect(after.create - (before.create ?? 0)).toBe(1);
+  expect(after.approve ?? 0).toBe(before.approve ?? 0);
+});
+
+it("validates verified upstream languages, instruction length and UTF-8 byte limit before creating", async () => {
+  const before = await stats();
+  await expect(create(actor, { ...input(), language: "fr" })).rejects.toThrow();
+  await expect(
+    create(actor, { ...input(), instructions: "x".repeat(3000) }),
+  ).rejects.toThrow();
+  await expect(
+    create(actor, { ...input(), instructions: "あ".repeat(2800) }),
+  ).rejects.toThrow();
+  expect((await stats()).create ?? 0).toBe(before.create ?? 0);
+});
+
+it("a known pre-insert 401 can be corrected and retried with the SAME key without duplicates", async () => {
+  const details = input(),
+    g = stub(`create:owner:test-client:${details.request_key}`, "create-only");
+  const before = await stats();
+  await g.setCreationTestSecret("test-wrong-creation-secret");
+  await expect(g.create(details, actor)).rejects.toThrow(
+    "CREATION_CREDENTIAL_REJECTED",
+  );
+  expect((await stats()).create ?? 0).toBe(before.create ?? 0);
+  await g.setCreationTestSecret("test-create");
+  const s = (await g.create(details, actor)) as Snapshot;
+  expect(s.state).toBe("pending_approval");
+  expect(await g.create(details, actor)).toMatchObject({ id: s.id });
+  expect((await stats()).create - (before.create ?? 0)).toBe(1);
+  expect((await stats()).approve ?? 0).toBe(before.approve ?? 0);
 });

@@ -34,10 +34,13 @@ if (
   );
 if (auth.vars.OWNER_TOKEN_VERSION !== mcp.vars.OWNER_TOKEN_VERSION)
   fail("OWNER_TOKEN_VERSION must match in both Worker configs.");
+if (mcp.vars.OUTBOUND_EXECUTION_ENABLED !== "false")
+  fail("Creation-only release: outbound execution must remain disabled.");
 if (
   mcp.vars.OUTBOUND_ENABLED === "true" &&
   (mcp.vars.OUTBOUND_CONTRACT_VERIFIED !== "true" ||
-    !JSON.parse(mcp.vars.OUTBOUND_ALLOWED_DESTINATIONS).length)
+    (!JSON.parse(mcp.vars.OUTBOUND_ALLOWED_DESTINATIONS ?? "[]").length &&
+      mcp.vars.OUTBOUND_PRIVATE_ALLOWLIST_CONFIGURED !== "true"))
 )
   fail(
     "Outbound requires a verified upstream contract and an explicit destination allowlist.",

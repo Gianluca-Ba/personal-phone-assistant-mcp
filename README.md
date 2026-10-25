@@ -2,7 +2,7 @@
 
 Livello MCP/OAuth per l’assistente telefonico Telnyx già operativo. Il progetto non sostituisce né distribuisce `personal-phone-assistant`, non modifica Telnyx e non applica migrazioni alle tabelle D1 esistenti.
 
-**Stato attuale:** approvazione web outbound rimossa; due strumenti outbound senza link, con controlli server e annotazioni per le conferme native di ChatGPT. **L’esecuzione reale rimane bloccata**: non è disponibile un adattatore attendibile che provi al Worker il consenso umano per la singola chiamata. Non basta abilitare una variabile per superare questo controllo.
+**Stato attuale:** fase di **sola creazione**: le richieste possono essere preparate come `pending_approval` per le destinazioni della allowlist privata. **Approvazione ed esecuzione restano disabilitate** con `OUTBOUND_EXECUTION_ENABLED=false` e con il controllo `verifiedNativeConsent()` invariato. Il preflight vieta di attivare l’esecuzione in questo rilascio. [Contratto verificato e configurazione della fase](docs/creation-only.md).
 
 Endpoint: `https://personal-phone-assistant-mcp.barsaglini-gianluca.workers.dev/mcp`.
 
@@ -57,11 +57,11 @@ Il test di un adattatore fidato è implementato **solo** in `tests/mcp-consent-f
 
 ## Configurazione attuale
 
-I due file Wrangler contengono gli ID già verificati del namespace `personal-phone-assistant-oauth-kv` e del database `phone-assistant-db` e i binding esistenti. Preview URL e osservabilità dei log sono disabilitate. `OUTBOUND_ENABLED=false`, `OUTBOUND_CONTRACT_VERIFIED=false` e allowlist vuota restano invariati in produzione.
+I due file Wrangler contengono gli ID già verificati del namespace `personal-phone-assistant-oauth-kv` e del database `phone-assistant-db` e i binding esistenti. Preview URL e osservabilità dei log sono disabilitate. `OUTBOUND_ENABLED=true` e `OUTBOUND_CONTRACT_VERIFIED=true` abilitano la sola preparazione. `OUTBOUND_EXECUTION_ENABLED=false` impedisce l’approvazione. La variabile pubblica della allowlist resta vuota; il numero autorizzato è nel Secret `OUTBOUND_ALLOWED_DESTINATIONS_SECRET`.
 
 `SCHEMA_MAPPING` usa `calls.caller_number`, `calls.destination_number`, `calls.created_at`, `call_summaries.summary_it`, `call_summaries.action_required` e `outbound_requests.destination_number`. La data usata per filtri e ordinamento è `created_at` perché le chiamate esistenti avevano `started_at` nullo. Le query selezionano solo colonne realmente presenti tramite `PRAGMA table_info`; i callback token non vengono selezionati.
 
-Prima di una futura abilitazione della sola preparazione occorre verificare il contratto HTTP reale, senza eseguire telefonate. L’adattatore attuale invia `{destination_number, language, instructions}` a `POST /outbound/requests` e si aspetta `{id: UUID, status: "pending_approval"}`. Il contratto è esercitato con un servizio simulato nei test, non certificato in produzione. L’approvazione usa il secret separato e `POST /outbound/requests/{id}/approve`; nel codice di produzione non è raggiungibile senza un adattatore di consenso attendibile.
+Il contratto HTTP di sola preparazione è stato verificato in lettura sul codice del Worker telefonico, senza eseguire telefonate. L’adattatore attuale invia `{destination_number, language, instructions}` a `POST /outbound/requests` e si aspetta `{id: UUID, status: "pending_approval"}`. Il contratto è esercitato con un servizio simulato nei test; il collaudo reale di preparazione richiede la credenziale originale esatta. L’approvazione usa il secret separato e `POST /outbound/requests/{id}/approve`; nel codice di produzione non è raggiungibile senza un adattatore di consenso attendibile.
 
 Per ispezionare lo schema usare esclusivamente query di lettura:
 
@@ -108,3 +108,5 @@ La revoca standard è pubblicata nella discovery. KV è eventualmente consistent
 I tool outbound richiedono ora un challenge HTTP `403 insufficient_scope`, completo di `WWW-Authenticate` e `_meta["mcp/www_authenticate"]`, invece di un normale errore “Missing authorization”. `tools/list` dichiara gli scope OAuth per ciascun tool. [Procedura precisa per aggiornare l’autorizzazione ChatGPT](docs/oauth-step-up.md). Lo scope aggiuntivo non abilita l’esecuzione reale.
 
 La riconnessione dalla chat è stata corretta anche nel percorso di refresh automatico: [causa riprodotta, correzione e consenso richiesto](docs/oauth-reconnect-diagnosis.md). Per questo rilascio sono necessari Auth e MCP, in quest’ordine; non il Worker telefonico.
+
+Per l’intervento corrente di sola creazione si distribuisce **soltanto MCP** (`npm run deploy:mcp`): [procedura e protezioni](docs/creation-only.md). L’ordine Auth → MCP descritto sopra riguarda il precedente aggiornamento OAuth.

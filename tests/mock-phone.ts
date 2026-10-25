@@ -27,7 +27,7 @@ export default {
       );
     if (u.pathname === "/outbound/requests") {
       if (request.headers.get("Authorization") !== "Bearer test-create")
-        return new Response("Forbidden", { status: 403 });
+        return new Response("Forbidden", { status: 401 });
       const b = (await request.json()) as {
         destination_number: string;
         language: string;
@@ -55,7 +55,7 @@ export default {
     }
     if (u.pathname.endsWith("/approve")) {
       if (request.headers.get("Authorization") !== "Bearer test-approve")
-        return new Response("Forbidden", { status: 403 });
+        return new Response("Forbidden", { status: 401 });
       const id = u.pathname.split("/")[3];
       await env.DB.prepare("INSERT INTO mock_events VALUES (?)")
         .bind("approve")
