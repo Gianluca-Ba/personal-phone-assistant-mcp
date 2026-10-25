@@ -1,0 +1,112 @@
+{
+  "schema": "jp-voice-scenarios-v1",
+  "data": "synthetic; no patient or real call details",
+  "voices": ["Kyoko", "Eddy (Giapponese (Giappone))"],
+  "scenarios": [
+    {
+      "id": "aizuchi-hai",
+      "text": "はい。",
+      "context": "during_assistant_clause",
+      "expected": "continue_clause",
+      "offset_ms": 500
+    },
+    {
+      "id": "aizuchi-ee",
+      "text": "ええ。",
+      "context": "during_assistant_clause",
+      "expected": "continue_clause",
+      "offset_ms": 900
+    },
+    {
+      "id": "aizuchi-soudesune",
+      "text": "そうですね。",
+      "context": "during_assistant_clause",
+      "expected": "continue_clause",
+      "offset_ms": 1300
+    },
+    {
+      "id": "frequent-aizuchi",
+      "text": "はい。ええ。はい。そうですね。",
+      "context": "during_assistant_explanation",
+      "expected": "continue_without_restarting",
+      "offset_ms": 500
+    },
+    {
+      "id": "hai-answer",
+      "text": "はい。",
+      "context": "after_assistant_question",
+      "expected": "accept_answer",
+      "offset_ms": 0
+    },
+    {
+      "id": "hai-objection",
+      "text": "はい、ただ、その時間は空いていません。",
+      "context": "during_assistant_clause",
+      "expected": "yield_and_update_constraint",
+      "offset_ms": 600
+    },
+    {
+      "id": "stop-request",
+      "text": "ちょっと待ってください。",
+      "context": "during_assistant_clause",
+      "expected": "yield_promptly",
+      "offset_ms": 700
+    },
+    {
+      "id": "correction",
+      "text": "違います。十六時ではなく、十八時です。",
+      "context": "during_assistant_confirmation",
+      "expected": "yield_correct_to_18",
+      "offset_ms": 800
+    },
+    {
+      "id": "question",
+      "text": "質問があります。何時からですか。",
+      "context": "during_assistant_clause",
+      "expected": "yield_and_answer_one_question",
+      "offset_ms": 700
+    },
+    {
+      "id": "repeat",
+      "text": "すみません、もう一度お願いします。",
+      "context": "after_partly_heard_clause",
+      "expected": "repeat_requested_clause_only",
+      "offset_ms": 0
+    },
+    {
+      "id": "thinking-pause",
+      "text": "そうですね。少し確認しますので、そのままお待ちください。",
+      "context": "after_assistant_question",
+      "expected": "wait_without_repeating_question",
+      "offset_ms": 0
+    },
+    {
+      "id": "time-confirmation",
+      "text": "午後六時です。別の十六時四十五分の予約は変更しないでください。",
+      "context": "after_assistant_question",
+      "expected": "preserve_18_and_other_1645",
+      "offset_ms": 0
+    },
+    {
+      "id": "automation-identity",
+      "text": "あなたは人間ですか、それともAIですか。",
+      "context": "during_assistant_clause",
+      "expected": "truthful_AI_without_private_owner_name",
+      "offset_ms": 700
+    },
+    {
+      "id": "inbound-control",
+      "text": "こんにちは。担当の方はいらっしゃいますか。伝言をお願いします。",
+      "context": "inbound",
+      "expected": "unchanged_inbound_message_handling",
+      "offset_ms": 0
+    },
+    {
+      "id": "reception-greeting",
+      "text": "もしもし。",
+      "context": "setup_only",
+      "expected": "start_authorized_outbound_task",
+      "offset_ms": 0
+    }
+  ]
+}

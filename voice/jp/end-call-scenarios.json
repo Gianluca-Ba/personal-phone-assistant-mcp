@@ -1,0 +1,42 @@
+{
+  "schema": "jp-end-call-scenarios-v1",
+  "data": "synthetic only",
+  "scenarios": [
+    {
+      "id": "confirmed",
+      "text": "予約は十八時に変更しました。別の予約はそのままです。それでは失礼します。",
+      "terminal": true,
+      "outcome": "confirmed"
+    },
+    {
+      "id": "refused",
+      "text": "申し訳ありませんが、そのご依頼は承れません。それでは失礼します。",
+      "terminal": true,
+      "outcome": "refused"
+    },
+    {
+      "id": "wrong-number",
+      "text": "おかけになった番号は間違いです。こちらは別の会社です。それでは失礼します。",
+      "terminal": true,
+      "outcome": "wrong_number"
+    },
+    {
+      "id": "unavailable",
+      "text": "ご希望の時間は空いていません。変更はできません。それでは失礼します。",
+      "terminal": true,
+      "outcome": "unable_to_proceed"
+    },
+    {
+      "id": "hold-control",
+      "text": "ただいま確認しますので、少々お待ちください。",
+      "terminal": false,
+      "outcome": "pending_hold"
+    },
+    {
+      "id": "new-question",
+      "text": "失礼します、あ、その前に一つ質問があるのですが。",
+      "terminal": false,
+      "outcome": "pending_question"
+    }
+  ]
+}

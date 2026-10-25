@@ -1,0 +1,91 @@
+{
+  "provenance": "Actual Telnyx WebSocket audio sessions, isolated assistants, synthetic Japanese speaker; not PSTN",
+  "real_calls": 0,
+  "production_release_passed": false,
+  "runs": [
+    {
+      "run": "ivr-validation",
+      "scenario": "ivr-change",
+      "source_sha256": "ff634ebfdeb91651cfd5dad5ebc2756c2170e48695943b050189ecfae2d5459c",
+      "session_started": true,
+      "dtmf_attempts": [],
+      "dtmf_successes": 0,
+      "caller_finished_before_close": true,
+      "closed_by_server": false,
+      "unplayed_followup_menus": null
+    },
+    {
+      "run": "ivr-validation",
+      "scenario": "ivr-no-option",
+      "source_sha256": "1cb03b67c4aa97d8ea8f3a748f766dcd2caaa215b41d5b26e7ce244e2cc5d6e3",
+      "session_started": true,
+      "dtmf_attempts": [],
+      "dtmf_successes": 0,
+      "caller_finished_before_close": true,
+      "closed_by_server": false,
+      "unplayed_followup_menus": null
+    },
+    {
+      "run": "ivr-validation",
+      "scenario": "ivr-sensitive",
+      "source_sha256": "cdfb2f9ed9b39a988ec0d2a8726bee3ccd7822e512a720f4472377d1abac49b9",
+      "session_started": true,
+      "dtmf_attempts": [],
+      "dtmf_successes": 0,
+      "caller_finished_before_close": true,
+      "closed_by_server": false,
+      "unplayed_followup_menus": null
+    },
+    {
+      "run": "ivr-validation-v2",
+      "scenario": "ivr-change",
+      "source_sha256": "399c343f0e724a1da3d7a4ef03fa82cd168ca89062e28894994a466bdc843f9b",
+      "session_started": true,
+      "dtmf_attempts": [],
+      "dtmf_successes": 0,
+      "caller_finished_before_close": true,
+      "closed_by_server": false,
+      "unplayed_followup_menus": null
+    },
+    {
+      "run": "ivr-minimal-v2",
+      "scenario": "ivr-change",
+      "source_sha256": "be3b17f94ec4012b8309f00b82c64eb6effd9ac336fa6470b052ee9e951d5ace",
+      "session_started": true,
+      "dtmf_attempts": [],
+      "dtmf_successes": 0,
+      "caller_finished_before_close": true,
+      "closed_by_server": true,
+      "unplayed_followup_menus": null
+    },
+    {
+      "run": "ivr-sequence-validation",
+      "scenario": "ivr-multilevel",
+      "source_sha256": "9fc81a82e63d12f7f60ac1cf37aa84d1ce9e0790e02473d55e268dbd116600f1",
+      "session_started": true,
+      "dtmf_attempts": [],
+      "dtmf_successes": 0,
+      "caller_finished_before_close": true,
+      "closed_by_server": false,
+      "unplayed_followup_menus": 1
+    },
+    {
+      "run": "ivr-sequence-validation",
+      "scenario": "ivr-repeat",
+      "source_sha256": "0155c9550eaaa3d277803d50daf1d06bdd1d0f42040a543cfb823d20f72a1438",
+      "session_started": true,
+      "dtmf_attempts": [
+        {
+          "digits": "2"
+        },
+        {
+          "digits": "2"
+        }
+      ],
+      "dtmf_successes": 2,
+      "caller_finished_before_close": false,
+      "closed_by_server": true,
+      "unplayed_followup_menus": 0
+    }
+  ]
+}
