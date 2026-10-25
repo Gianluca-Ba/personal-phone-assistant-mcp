@@ -49,3 +49,32 @@ Rollback: restore the saved phone deployment version or set `CALL_SUMMARY_FORMAT
 ## Validation commands
 
 `npm run typecheck`, `npm test`, `npm run test:phone-voice`, `npm run test:voice-edge`, `npm run build`, and a phone-specific Wrangler dry run using the private release config. CI runs the same repository checks on push. Tests cover successful/partial/unresolved/technical-failure outcomes, original Japanese translation, absent/partial transcripts, supported events, source/evidence validation, duplicate/concurrent notifications, uncertain MailApp outcomes, UTC/JST rollover, HTML safety, legacy acknowledgement rejection, and protected inbound/outbound boundaries.
+
+## Production verification — 25 October 2026
+
+Implementation commit: [`5b0a16a`](https://github.com/Gianluca-Ba/personal-phone-assistant-mcp/commit/5b0a16afd676b44dcf29beebac76f01fe68ed893). [CI run 40199749172](https://github.com/Gianluca-Ba/personal-phone-assistant-mcp/actions/runs/40199749172) passed. Local checks passed: 133 tests (including 23 summary tests), type checks, formatting, all dry-run builds, 24 legacy phone contract checks, 29 guarded outbound checks, and 11 workerd checks. The phone-specific release bundle also built successfully.
+
+Only `personal-phone-assistant` was deployed, version `1e06f896-f130-49ed-b040-5283a418f5b1`; Apps Script was updated to version 4 of its existing deployment. MCP, Auth, Voice and Telnyx configurations were not deployed or changed. Live checks confirmed `CALL_SUMMARY_FORMAT=v2`, all existing bindings unchanged, the existing ten-minute cron retained, and `/health` reporting the database connected with zero unsent notifications. Version-preview URLs remain disabled; the release preparer now makes that explicit to prevent Wrangler's implicit preview enablement.
+
+The Apps Script capability endpoint returned HTTP 200/version 2; an unauthenticated POST returned `unauthorized`. A recorded Apple Kawasaki conversation was fetched and processed through the production-model extraction/translation code without a new telephone call. Its report contained a 45-word Italian outcome, four recorded spoken turns translated into English plus one supported silence event, and no claimed operator answer or invented stock date. The email subject was `TEST — Call Summary v2 — Apple Kawasaki — Operatore non raggiunto`.
+
+The manual Apps Script test sent one message to the pre-existing owner recipient and submitted the same test ID twice: the second was acknowledged as a duplicate. Both HTML and plain-text MIME parts were inspected. The message was then verified **in the recipient's Gmail inbox**, including its Italian summary and English transcript. Desktop rendering was inspected in Gmail. The same HTML was checked at 1280 px and 390 px; document width matched viewport width in both cases, with all five transcript entries retained and no horizontal overflow. The 390 px result is a browser responsive check, not certification of every native mobile mail application.
+
+No real calls were initiated, no test rows were inserted in production D1, and no historical call notifications were replayed. The test ID is separate from the real call ID. Future insight-triggered v2 delivery uses the deployed cron; this verification did not manufacture a signed completion webhook or initiate a new call merely to exercise that trigger.
+
+### Complete file list
+
+| File                                              | Purpose                                                |
+| ------------------------------------------------- | ------------------------------------------------------ |
+| `workers/notifications/src/summary.mjs`           | Extraction, schemas, alignment, translation, rendering |
+| `workers/notifications/src/provider.mjs`          | Provider lookup/inference and delivery contract        |
+| `apps-script/summary-v2.gs`                       | Authenticated delivery integration and deduplication   |
+| `scripts/patch-phone-summary.mjs`                 | Guarded notification-only phone patch                  |
+| `scripts/patch-apps-script-summary.mjs`           | Preserve existing authentication and legacy fallback   |
+| `scripts/prepare-summary-release.mjs`             | Private release generation and preview policy          |
+| `tests/call-summary.test.ts`                      | 23 regression and delivery tests                       |
+| `tests/fixtures/call-summary-real-excerpts.json`  | Minimal real, labelled transcript excerpts             |
+| `tests/fixtures/phone-notifications.original.mjs` | Sanitized notification contract snapshot               |
+| `tsconfig.notifications.json`                     | Notification JavaScript type checking                  |
+| `package.json`                                    | Include notification type checks/build in CI           |
+| `docs/call-summary-v2.md`                         | Architecture, deployment, verification and rollback    |

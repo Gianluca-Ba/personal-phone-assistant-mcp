@@ -26,6 +26,8 @@ const write = (name, value) =>
 write("phone.mjs", p.source);
 write("notifications.gs", patchAppsScript(readFileSync(gasSource, "utf8")));
 config.main = resolve(outDir, "phone.mjs");
+// Do not let Wrangler implicitly expose version-preview URLs.
+config.preview_urls ??= false;
 config.vars = {
   ...config.vars,
   CALL_SUMMARY_FORMAT: "v2",
