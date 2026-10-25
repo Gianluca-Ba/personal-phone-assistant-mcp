@@ -1,0 +1,23 @@
+[
+  {
+    "case": "Apple Kawasaki — 25 October 2026",
+    "provenance": "Minimal original transcript excerpt; public IVR wording only. Not a full transcript.",
+    "japanese": "営業時間や道順については1を Apple のテクニカルサポートセンター Apple ケアに転送するには2を法人のお客様は3をその他のご質問は5を押してください。",
+    "english": "Press:\n1 — Business hours or directions\n2 — Transfer to Apple's technical support center, Apple Care\n3 — Corporate customers\n5 — Other inquiries",
+    "expected_task": "unresolved"
+  },
+  {
+    "case": "Yodobashi Camera Akiba — 25 October 2026",
+    "provenance": "Minimal original ASR excerpt; preserves the recorded wording, including recognition limitations. Not a full transcript.",
+    "japanese": "申し訳ございません。こちら iPhone 利用につきましては在庫がない状態でございまして、次の入荷も未定でございます。",
+    "english": "We apologize. Regarding iPhone use, it is currently out of stock, and the next restock date is also undecided.",
+    "expected_task": "partially_successful"
+  },
+  {
+    "case": "Bic Camera AKIBA — 25 October 2026",
+    "provenance": "Minimal original ASR excerpt. Store branch was not explicitly confirmed; case label is not verified speaker identity. Not a full transcript.",
+    "japanese": "現在次回入荷は全くの未定となっております。",
+    "english": "At present, the next restock date is completely undecided.",
+    "expected_task": "partially_successful"
+  }
+]

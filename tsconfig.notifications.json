@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "strict": false,
+    "types": ["@cloudflare/workers-types", "node"]
+  },
+  "include": ["workers/notifications/src/**/*.mjs"]
+}

@@ -7,9 +7,9 @@
     "node": ">=22"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.tests.json && tsc --noEmit -p tsconfig.voice.json",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.tests.json && tsc --noEmit -p tsconfig.voice.json && tsc --noEmit -p tsconfig.notifications.json",
     "test": "vitest run",
-    "build": "wrangler deploy --dry-run --config workers/auth/wrangler.jsonc && wrangler deploy --dry-run --config workers/mcp/wrangler.jsonc && wrangler deploy --dry-run --config workers/voice/wrangler.jsonc",
+    "build": "wrangler deploy --dry-run --config workers/auth/wrangler.jsonc && wrangler deploy --dry-run --config workers/mcp/wrangler.jsonc && wrangler deploy --dry-run --config workers/voice/wrangler.jsonc && npm run build:notifications",
     "deploy:auth": "wrangler deploy --config workers/auth/wrangler.jsonc",
     "deploy:mcp": "wrangler deploy --config workers/mcp/wrangler.jsonc",
     "configure": "node scripts/configure.mjs",
@@ -19,7 +19,8 @@
     "format": "prettier --write workers tests scripts *.json .github/workflows/*.yml README.md",
     "smoke:live": "node scripts/smoke-live.mjs",
     "test:phone-voice": "node scripts/verify-phone-voice.mjs",
-    "test:voice-edge": "node scripts/test-voice-edge.mjs"
+    "test:voice-edge": "node scripts/test-voice-edge.mjs",
+    "build:notifications": "esbuild workers/notifications/src/provider.mjs --bundle --format=esm --platform=browser --outfile=.wrangler/summary-build.mjs"
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "1.2.4",
