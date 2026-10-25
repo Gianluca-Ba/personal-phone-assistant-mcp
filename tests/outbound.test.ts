@@ -14,6 +14,7 @@ const base = parse(readFileSync("workers/mcp/wrangler.jsonc", "utf8"));
 const vars = {
   ...base.vars,
   SCHEMA_MAPPING: "",
+  OUTBOUND_DESTINATION_POLICY: "allowlist",
   OUTBOUND_ENABLED: "true",
   OUTBOUND_EXECUTION_ENABLED: "true",
   OUTBOUND_CONTRACT_VERIFIED: "true",
@@ -53,11 +54,28 @@ const harness = createTestHarness({
     },
     {
       config: {
+        ...base,
+        name: "standard-destinations",
+        main: "workers/mcp/src/index.ts",
+        vars: {
+          ...vars,
+          OUTBOUND_DESTINATION_POLICY: "all_standard",
+          OUTBOUND_ALLOWED_DESTINATIONS_SECRET: '["+819012345678"]',
+        },
+      },
+    },
+    {
+      config: {
         name: "gate-driver",
         main: "tests/gate-driver.ts",
         compatibility_date: "2026-10-01",
         durable_objects: {
           bindings: [
+            {
+              name: "STANDARD",
+              class_name: "OutboundGate",
+              script_name: "standard-destinations",
+            },
             {
               name: "FIXTURE",
               class_name: "OutboundGate",
@@ -112,7 +130,7 @@ let env: Awaited<ReturnType<typeof mcp.getEnv>>, realEnv: OutboundEnv;
 const driver = harness.getWorker("gate-driver");
 function stub(
   name: string,
-  target: "fixture" | "real" | "create-only" = "fixture",
+  target: "fixture" | "real" | "create-only" | "standard" = "fixture",
 ) {
   return new Proxy(
     {},
@@ -845,4 +863,63 @@ it("a 202 dispatch_unknown response stays unknown and cannot be resubmitted", as
     "ALREADY_SUBMITTED_OR_UNKNOWN",
   );
   expect((await stats()).approve - (before.approve ?? 0)).toBe(1);
+});
+
+it("all_standard prepares Japanese mobile and landline requests despite a different private allowlist, without calling", async () => {
+  const before = await stats();
+  for (const destination of ["+818042887648", "+81364256814"]) {
+    const details = { ...input(), destination };
+    const g = stub(
+      `create:owner:test-client:${details.request_key}`,
+      "standard",
+    );
+    const s = (await g.create(details, actor)) as Snapshot;
+    expect(s).toMatchObject({ state: "pending_approval", destination });
+    expect(await g.create(details, actor)).toMatchObject({ id: s.id });
+    const row = await env.DB.prepare(
+      "SELECT status,authorized_at,telnyx_call_id FROM outbound_requests WHERE id=?",
+    )
+      .bind(s.id)
+      .first();
+    expect(row).toEqual({
+      status: "pending_approval",
+      authorized_at: null,
+      telnyx_call_id: null,
+    });
+  }
+  const after = await stats();
+  expect(after.create - (before.create ?? 0)).toBe(2);
+  expect(after.approve ?? 0).toBe(before.approve ?? 0);
+});
+it("all_standard rejects forbidden destinations before contacting the phone service", async () => {
+  const before = await stats();
+  for (const destination of [
+    "+19002345678",
+    "+81570123456",
+    "+81120123456",
+    "+881612345678",
+    "+81110",
+    "+999123456789",
+  ]) {
+    const details = { ...input(), destination };
+    await expect(
+      stub(
+        `create:owner:test-client:${details.request_key}`,
+        "standard",
+      ).create(details, actor),
+    ).rejects.toThrow();
+  }
+  expect((await stats()).create ?? 0).toBe(before.create ?? 0);
+  expect((await stats()).approve ?? 0).toBe(before.approve ?? 0);
+});
+
+it("destination restrictions are rechecked at approval if policy changes after creation", async () => {
+  const s = await create(),
+    g = gate(s.id),
+    before = await stats();
+  await g.setDestinationTestPolicy("all_standard", '["+81"]');
+  await expect(g.approve(approve(s), actor)).rejects.toThrow(
+    "DESTINATION_NOT_ALLOWED",
+  );
+  expect((await stats()).approve ?? 0).toBe(before.approve ?? 0);
 });

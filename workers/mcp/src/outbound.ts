@@ -1,6 +1,7 @@
+import { destinationAllowed, type DestinationEnv } from "./destinations";
 import { DurableObject } from "cloudflare:workers";
 import { z } from "zod";
-const number = z.string().regex(/^\+[1-9]\d{7,14}$/);
+const number = z.string().regex(/^\+[1-9]\d{1,14}$/);
 const language = z.enum(["auto", "ja", "it", "en", "pt"]);
 const canonicalInstructions = (input: { goal: string; instructions: string }) =>
   `Goal: ${input.goal}\n\n${input.instructions}`;
@@ -53,7 +54,7 @@ export interface Principal {
   tokenVersion: string;
   scope: string[];
 }
-export interface OutboundEnv {
+export interface OutboundEnv extends DestinationEnv {
   DB: D1Database;
   PHONE_API: Fetcher;
   OUTBOUND_GATE: DurableObjectNamespace<OutboundGate>;
@@ -64,8 +65,6 @@ export interface OutboundEnv {
   OUTBOUND_CONTRACT_VERIFIED?: string;
   OUTBOUND_API_SECRET?: string;
   OUTBOUND_APPROVAL_SECRET?: string;
-  OUTBOUND_ALLOWED_DESTINATIONS?: string;
-  OUTBOUND_ALLOWED_DESTINATIONS_SECRET?: string;
   OUTBOUND_RATE_LIMIT_PER_HOUR?: string;
 }
 export type Snapshot = z.infer<typeof approveInput> & {
@@ -95,17 +94,9 @@ export class OutboundGate extends DurableObject<OutboundEnv> {
       fail("NOT_AUTHORIZED");
   }
   private allowed(destination: string) {
-    const list = JSON.parse(
-      this.env.OUTBOUND_ALLOWED_DESTINATIONS_SECRET ??
-        this.env.OUTBOUND_ALLOWED_DESTINATIONS ??
-        "[]",
-    );
-    return (
-      Array.isArray(list) &&
-      list.every((v) => typeof v === "string") &&
-      list.includes(destination)
-    );
+    return destinationAllowed(destination, this.env);
   }
+
   private configured() {
     if (!enabled(this.env)) fail("OUTBOUND_DISABLED");
   }

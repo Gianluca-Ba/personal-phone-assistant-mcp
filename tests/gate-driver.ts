@@ -7,10 +7,11 @@ export default {
       FIXTURE: DurableObjectNamespace;
       REAL: DurableObjectNamespace;
       CREATION: DurableObjectNamespace;
+      STANDARD: DurableObjectNamespace;
     },
   ) {
     const input = (await request.json()) as {
-      target: "fixture" | "real" | "create-only";
+      target: "fixture" | "real" | "create-only" | "standard";
       name: string;
       method: string;
       args: unknown[];
@@ -18,6 +19,7 @@ export default {
     const allowed = [
       "create",
       "setCreationTestSecret",
+      "setDestinationTestPolicy",
       "register",
       "approve",
       "status",
@@ -27,11 +29,13 @@ export default {
     if (!allowed.includes(input.method))
       return new Response("Invalid method", { status: 400 });
     const ns =
-      input.target === "create-only"
-        ? env.CREATION
-        : input.target === "real"
-          ? env.REAL
-          : env.FIXTURE;
+      input.target === "standard"
+        ? env.STANDARD
+        : input.target === "create-only"
+          ? env.CREATION
+          : input.target === "real"
+            ? env.REAL
+            : env.FIXTURE;
     const stub = ns.get(ns.idFromName(input.name)) as unknown as Record<
       string,
       (...args: unknown[]) => Promise<unknown>

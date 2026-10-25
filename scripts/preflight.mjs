@@ -42,13 +42,52 @@ if (
   fail(
     "Execution requires the explicit conversation-policy-v1 operational policy.",
   );
-if (
-  mcp.vars.OUTBOUND_ENABLED === "true" &&
-  (mcp.vars.OUTBOUND_CONTRACT_VERIFIED !== "true" ||
-    (!JSON.parse(mcp.vars.OUTBOUND_ALLOWED_DESTINATIONS ?? "[]").length &&
-      mcp.vars.OUTBOUND_PRIVATE_ALLOWLIST_CONFIGURED !== "true"))
-)
-  fail(
-    "Outbound requires a verified upstream contract and an explicit destination allowlist.",
-  );
+const policy = mcp.vars.OUTBOUND_DESTINATION_POLICY ?? "allowlist";
+if (!["allowlist", "all_standard"].includes(policy))
+  fail("Unknown outbound destination policy.");
+if (mcp.vars.OUTBOUND_ENABLED === "true") {
+  if (mcp.vars.OUTBOUND_CONTRACT_VERIFIED !== "true")
+    fail("Outbound requires a verified upstream contract.");
+  if (
+    policy === "allowlist" &&
+    !JSON.parse(mcp.vars.OUTBOUND_ALLOWED_DESTINATIONS ?? "[]").length &&
+    mcp.vars.OUTBOUND_PRIVATE_ALLOWLIST_CONFIGURED !== "true"
+  )
+    fail("Allowlist mode requires a destination allowlist.");
+  if (policy === "all_standard") {
+    const knownTypes = [
+      "MOBILE",
+      "FIXED_LINE",
+      "FIXED_LINE_OR_MOBILE",
+      "VOIP",
+      "PREMIUM_RATE",
+      "TOLL_FREE",
+      "SHARED_COST",
+      "PERSONAL_NUMBER",
+      "PAGER",
+      "UAN",
+      "VOICEMAIL",
+    ];
+    for (const [name, valid] of [
+      ["OUTBOUND_BLOCKED_PREFIXES", (value) => /^\+[1-9]\d{0,14}$/.test(value)],
+      [
+        "OUTBOUND_BLOCKED_DESTINATIONS",
+        (value) => /^\+[1-9]\d{1,14}$/.test(value),
+      ],
+      ["OUTBOUND_BLOCKED_NUMBER_TYPES", (value) => knownTypes.includes(value)],
+    ]) {
+      try {
+        const values = JSON.parse(mcp.vars[name] ?? "[]");
+        if (
+          !Array.isArray(values) ||
+          values.length > 1000 ||
+          !values.every((value) => typeof value === "string" && valid(value))
+        )
+          throw new Error();
+      } catch {
+        fail("Invalid destination restriction configuration: " + name);
+      }
+    }
+  }
+}
 console.log("Integration Worker configuration verified.");

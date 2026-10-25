@@ -59,6 +59,26 @@ it("configuration scripts accept JSONC, reject placeholders, and never target th
       JSON.stringify(configured),
     );
     expect(run("preflight.mjs").status).toBe(0);
+    configured.vars.OUTBOUND_PRIVATE_ALLOWLIST_CONFIGURED = "false";
+    configured.vars.OUTBOUND_DESTINATION_POLICY = "all_standard";
+    writeFileSync(
+      join(temp, "workers/mcp/wrangler.jsonc"),
+      JSON.stringify(configured),
+    );
+    expect(run("preflight.mjs").status).toBe(0);
+    configured.vars.OUTBOUND_DESTINATION_POLICY = "typo";
+    writeFileSync(
+      join(temp, "workers/mcp/wrangler.jsonc"),
+      JSON.stringify(configured),
+    );
+    expect(run("preflight.mjs").status).toBe(1);
+    configured.vars.OUTBOUND_DESTINATION_POLICY = "all_standard";
+    configured.vars.OUTBOUND_BLOCKED_PREFIXES = '["+"]';
+    writeFileSync(
+      join(temp, "workers/mcp/wrangler.jsonc"),
+      JSON.stringify(configured),
+    );
+    expect(run("preflight.mjs").status).toBe(1);
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }

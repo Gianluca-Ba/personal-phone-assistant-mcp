@@ -76,7 +76,7 @@ function makeServer(env: Env, principal: Principal) {
         content: [
           {
             type: "text" as const,
-            text: "Operation failed safely. Check permissions, schema, destination allowlist and outbound status before retrying.",
+            text: "Operation failed safely. Check permissions, schema, destination policy and outbound status before retrying.",
           },
         ],
       };

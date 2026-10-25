@@ -8,6 +8,10 @@ export class OutboundGate extends ProductionGate {
   async setCreationTestSecret(secret: string) {
     this.env.OUTBOUND_API_SECRET = secret;
   }
+  async setDestinationTestPolicy(policy: string, prefixes: string) {
+    this.env.OUTBOUND_DESTINATION_POLICY = policy;
+    this.env.OUTBOUND_BLOCKED_PREFIXES = prefixes;
+  }
   async expireTestRequest() {
     const s = await this.ctx.storage.get<Snapshot>("snapshot");
     await this.ctx.storage.put("snapshot", {

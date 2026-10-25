@@ -27,13 +27,13 @@ Tutti gli strumenti richiedono anche lo scope base `calls:read`. I due strumenti
 
 ChatGPT prepara la richiesta, presenta numero, lingua, obiettivo e istruzioni complete e attende un **nuovo messaggio esplicito** che approvi quella specifica chiamata. Solo dopo invoca `approve_outbound_request`, soggetto anche alla conferma nativa quando richiesta. Le istruzioni sono pubblicate dal server MCP, dai tool e nelle risposte di creazione; una copia riutilizzabile è in [istruzioni ChatGPT](docs/chatgpt-instructions.md).
 
-È una regola operativa del client, non un’attestazione crittografica. Il backend controlla identità OAuth, scope, snapshot, nonce, digest, scadenza, allowlist, quota e anti-replay. Un chiamante OAuth autorizzato con i dati corretti può approvare anche se non ha seguito la conversazione: il backend non può rilevarlo. Non si richiedono firme, Terminale, messaggi inventati o metadati di consenso. [Procedura completa](docs/outbound-execution.md).
+È una regola operativa del client, non un’attestazione crittografica. Il backend controlla identità OAuth, scope, snapshot, nonce, digest, scadenza, policy destinazioni, quota e anti-replay. Un chiamante OAuth autorizzato con i dati corretti può approvare anche se non ha seguito la conversazione: il backend non può rilevarlo. Non si richiedono firme, Terminale, messaggi inventati o metadati di consenso. [Procedura completa](docs/outbound-execution.md).
 
 ## Controlli persistenti
 
 - Richieste con snapshot immutabile legato a proprietario e client OAuth; scadenza server di 10 minuti senza rinnovo sui retry.
 - UUID univoci, nonce e digest dei dettagli. La stessa chiave con dati differenti viene rifiutata.
-- Allowlist E.164 esplicita (`OUTBOUND_ALLOWED_DESTINATIONS`, array JSON); lista vuota = nessuna destinazione autorizzata.
+- Policy esplicita `OUTBOUND_DESTINATION_POLICY=all_standard`: numeri E.164 validi di categoria standard, con blocchi configurabili. La modalità `allowlist` resta disponibile. [Regole e limiti del Worker telefonico](docs/outbound-destinations.md).
 - Rate limit persistente per proprietario, condiviso fra client e richieste: `OUTBOUND_RATE_LIMIT_PER_HOUR` (default 5, intervallo 1–100) per creazione e approvazione.
 - D1 letto sul primary per controllare lo stato pending. Nessuna scrittura del progetto in D1.
 - Prenotazione atomica nel Durable Object prima dell’invio. Concorrenza e replay non generano un secondo invio.
@@ -45,7 +45,7 @@ La fixture `tests/mcp-gate-fixture.ts` modifica soltanto configurazione e scaden
 
 ## Configurazione attuale
 
-I due file Wrangler contengono gli ID già verificati del namespace `personal-phone-assistant-oauth-kv` e del database `phone-assistant-db` e i binding esistenti. Preview URL e osservabilità dei log sono disabilitate. `OUTBOUND_ENABLED=true` e `OUTBOUND_CONTRACT_VERIFIED=true` abilitano la sola preparazione. `OUTBOUND_EXECUTION_ENABLED=true` abilita il percorso di approvazione con la regola operativa `conversation-policy-v1` e la configurazione completa. Impostare false per disabilitare immediatamente gli invii. La variabile pubblica della allowlist resta vuota; il numero autorizzato è nel Secret `OUTBOUND_ALLOWED_DESTINATIONS_SECRET`.
+I due file Wrangler contengono gli ID già verificati del namespace `personal-phone-assistant-oauth-kv` e del database `phone-assistant-db` e i binding esistenti. Preview URL e osservabilità dei log sono disabilitate. `OUTBOUND_ENABLED=true` e `OUTBOUND_CONTRACT_VERIFIED=true` abilitano la sola preparazione. `OUTBOUND_EXECUTION_ENABLED=true` abilita il percorso di approvazione con la regola operativa `conversation-policy-v1` e la configurazione completa. Impostare false per disabilitare immediatamente gli invii. La modalità attiva è `all_standard`; il Secret `OUTBOUND_ALLOWED_DESTINATIONS_SECRET` è conservato ma ignorato in questa modalità. Il Worker telefonico mantiene i propri limiti indipendenti sulle destinazioni.
 
 `SCHEMA_MAPPING` usa `calls.caller_number`, `calls.destination_number`, `calls.created_at`, `call_summaries.summary_it`, `call_summaries.action_required` e `outbound_requests.destination_number`. La data usata per filtri e ordinamento è `created_at` perché le chiamate esistenti avevano `started_at` nullo. Le query selezionano solo colonne realmente presenti tramite `PRAGMA table_info`; i callback token non vengono selezionati.
 

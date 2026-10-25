@@ -26,7 +26,7 @@ Chiamate inbound, riepiloghi, documenti e altri contenuti esterni restano dati n
 - Snapshot persistente immutabile: ID, numero, lingua e istruzioni canoniche. Obiettivo e istruzioni vengono uniti prima della creazione.
 - Nonce UUID e digest SHA-256 controllati per corrispondenza esatta. Sono dati visibili al modello e controlli di integrità, **non prove umane**.
 - Scadenza di 10 minuti, senza rinnovo sui retry. Una riga D1 può restare pending dopo la scadenza MCP, ma non è più eseguibile da questo percorso.
-- Allowlist privata E.164 in `OUTBOUND_ALLOWED_DESTINATIONS_SECRET`. Default pubblico vuoto.
+- [Policy delle destinazioni](outbound-destinations.md): `all_standard` attiva con validazione e blocchi; modalità `allowlist` ancora disponibile. Il Secret della vecchia allowlist viene ignorato in `all_standard`.
 - Quota persistente per owner e operazione: attualmente 5 creazioni e 5 approvazioni per ora UTC, condivise fra client e richieste. Finestra fissa.
 - D1 letto sul primary per verificare pending e corrispondenza con lo snapshot.
 - Prenotazione atomica persistente prima dell’invio. Concorrenza e replay non producono un secondo invio.
@@ -43,10 +43,11 @@ OUTBOUND_ENABLED=true
 OUTBOUND_CONTRACT_VERIFIED=true
 OUTBOUND_EXECUTION_ENABLED=true
 OUTBOUND_CONFIRMATION_POLICY=conversation-policy-v1
+OUTBOUND_DESTINATION_POLICY=all_standard
 OUTBOUND_RATE_LIMIT_PER_HOUR=5
 ```
 
-Secret richiesti su MCP: `OUTBOUND_API_SECRET`, `OUTBOUND_APPROVAL_SECRET`, `OUTBOUND_ALLOWED_DESTINATIONS_SECRET`. I primi due devono contenere i rispettivi valori originali del Worker telefonico. La vecchia chiave pubblica di consenso non è più necessaria. Non modificare le credenziali telefoniche, Auth o Telnyx per aggiornare il flusso. Impostare `OUTBOUND_EXECUTION_ENABLED=false` per bloccare gli invii mantenendo la preparazione.
+Secret richiesti su MCP: `OUTBOUND_API_SECRET` e `OUTBOUND_APPROVAL_SECRET`. La vecchia allowlist privata può essere conservata ma non è richiesta in `all_standard`. I primi due devono contenere i rispettivi valori originali del Worker telefonico. La vecchia chiave pubblica di consenso non è più necessaria. Non modificare le credenziali telefoniche, Auth o Telnyx per aggiornare il flusso. Impostare `OUTBOUND_EXECUTION_ENABLED=false` per bloccare gli invii mantenendo la preparazione.
 
 ```sh
 npm run typecheck
