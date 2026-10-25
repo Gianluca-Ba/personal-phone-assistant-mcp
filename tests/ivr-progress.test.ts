@@ -49,3 +49,25 @@ it("bounds supported DTMF duration and no-transition waiting without a transmiss
       dtmfTuning({ OUTBOUND_IVR_TRANSITION_TIMEOUT_MS: timeout }),
     ).toThrow();
 });
+
+it("recognizes a fact-bearing address/hours announcement as observable IVR progress, never human contact", () => {
+  const hoursMenu = "営業時間やアクセスのご案内については1を押してください。";
+  for (const text of [
+    "ストアは駅前の広場の近くにあります。",
+    "店舗の住所は神奈川県川崎市堀川町七十二の一です。",
+    "営業時間は午前10時から午後9時までです。",
+    "Our address is 72-1 Horikawacho.",
+  ])
+    expect(progressEvidence(hoursMenu, text)).toMatchObject({
+      kind: "information_announcement",
+    });
+  for (const text of [
+    "営業時間やアクセスについてご案内します。",
+    "住所については1を押してください。",
+    "営業時間は",
+    hoursMenu,
+  ])
+    expect(progressEvidence(hoursMenu, text)?.kind).not.toBe(
+      "information_announcement",
+    );
+});

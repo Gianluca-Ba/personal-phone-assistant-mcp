@@ -31,6 +31,7 @@ export default {
         service: "outbound-voice-control",
         ready: ready(env),
         pstn_pilot_verified: env.PSTN_PILOT_VERIFIED === "true",
+        spoken_output_policy: "validated-utterance-v2",
       });
     if (
       url.pathname === "/diagnostics/preflight" &&

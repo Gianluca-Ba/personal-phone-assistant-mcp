@@ -1,7 +1,12 @@
 // Transport-independent action gate. State events must come from the authenticated
 // media adapter, never from model arguments. Production uses signed Telnyx media.
 import { createHash, randomUUID } from "node:crypto";
-import { isBackchannel } from "./jp-backchannel.mjs";
+import {
+  isBackchannel,
+  isHoldRequest,
+  isHoldReturn,
+  isHoldFiller,
+} from "./jp-backchannel.mjs";
 import { PlaybackClock } from "./jp-playback-clock.mjs";
 const digest = (text) => createHash("sha256").update(text).digest("hex");
 const normalize = (text) =>
@@ -16,6 +21,94 @@ const terminal = new Set([
   "wrong_number",
   "unable_to_proceed",
 ]);
+// Conservative signals from authenticated recipient transcripts. Quoted,
+// hypothetical and interrogative wording is not a terminal declaration.
+export function recipientTerminalSignal(value) {
+  const text = String(value ?? "")
+    .normalize("NFKC")
+    .replace(/「[^」]*」|『[^』]*』|“[^”]*”|"[^"\n]*"/g, "");
+  for (const clause of text.split(/[。.!！\n]/)) {
+    if (
+      !clause.trim() ||
+      /[?？]|(?:ですか|ますか|ませんか|でしょうか|なのか|かね)[、,\s]*$/.test(
+        clause,
+      )
+    )
+      continue;
+    if (
+      /わけでは(?:ない|ありません)|訳では(?:ない|ありません)|ということでは(?:ない|ありません)|(?:営業時間外|閉店|休業)では(?:ない|ありません|ございません)|(?:の場合|のとき|でしたら|ならば)/.test(
+        clause,
+      )
+    )
+      continue;
+    if (
+      /(?:営業時間外|閉店|営業しておりません).{0,12}(?:という|といった|など|と表示|と案内|ですと)/.test(
+        clause,
+      )
+    )
+      continue;
+    if (
+      /(?:お(?:掛け|かけ)間違い)(?:では|じゃ)(?:ない|ありません|ございません)/.test(
+        clause,
+      )
+    )
+      continue;
+    if (
+      /(?:おつなぎ|お繋ぎ|転送)(?:し|いたし)ます|対応(?:が)?できます|(?:予約|ご案内|お問い合わせ|受付|お受け).{0,16}(?:できます|可能です|承れます|受け付け(?:ており|てい)ます)/.test(
+        clause,
+      )
+    )
+      continue;
+    if (
+      /(?:ただ今|只今|現在|今の時間|本日|当店|ストア|店舗|お店|こちら).{0,30}(?:営業(?:して|いたして)(?:おり|い)ません|営業時間外(?:です|でございます|となっております)|閉店(?:して)?(?:おり|い)ます|休業(?:して)?(?:おり|い)ます|営業(?:を)?終了(?:しました|いたしました|しております))|営業時間外(?:です|でございます|となっております)|本日は休業(?:です|いたします)|(?:we (?:are|['’]re)|the store is) (?:currently )?closed|outside (?:our )?business hours/i.test(
+        clause,
+      )
+    )
+      return { kind: "closed" };
+    if (
+      /お(?:掛け|かけ)間違い|(?:お電話番号|電話番号|おかけになった番号).{0,12}(?:が違います|を間違え|間違って)|wrong (?:phone )?number/i.test(
+        clause,
+      )
+    )
+      return { kind: "wrong_number" };
+    if (
+      /(?:現在|ただ今|只今).{0,16}電話に(?:出ることができません|出られません)|おつなぎ(?:することが)?できません|(?:no one|nobody) is (?:currently )?available|cannot (?:take|answer) your call/i.test(
+        clause,
+      )
+    )
+      return { kind: "unavailable" };
+    if (
+      /(?:承れません|お断り(?:いた)?します|対応できません|ご案内できません).*(?:失礼|切らせ|終了)/.test(
+        clause,
+      )
+    )
+      return {
+        kind: /承れません|お断り|no thank you/i.test(clause)
+          ? "refused"
+          : "unavailable",
+      };
+  }
+  if (
+    /(?:承れません|お断り(?:いた)?します|対応できません|ご案内できません)[。.!！\s]+(?:それでは|では|大変申し訳ありませんが|恐れ入りますが)?[、,\s]*(?:失礼(?:いた)?します|お電話を切らせて)/.test(
+      text,
+    ) ||
+    /(?:no thank you|cannot (?:fulfill|help with) (?:this|your) request)[.!\s]+(?:goodbye|good bye)/i.test(
+      text,
+    )
+  )
+    return {
+      kind: /承れません|お断り|no thank you/i.test(text)
+        ? "refused"
+        : "unavailable",
+    };
+  return null;
+}
+const terminalOutcome = (signal) =>
+  signal.kind === "wrong_number"
+    ? "wrong_number"
+    : signal.kind === "refused"
+      ? "refused"
+      : "unable_to_proceed";
 export class CallController {
   constructor({
     sendDigit,
@@ -25,7 +118,15 @@ export class CallController {
     requirePlaybackAck = true,
     stripCumulativeHistory = true,
     playFarewell = null,
+    maxHoldMs = 90000,
   }) {
+    if (!Number.isInteger(maxHoldMs) || maxHoldMs < 10000 || maxHoldMs > 90000)
+      throw Error("Invalid hold limit");
+    this.maxHoldMs = maxHoldMs;
+    this.hold = null;
+    this.holdExpired = false;
+    this.holdExpiry = null;
+    this.recipientTerminal = null;
     this.requirePlaybackAck = requirePlaybackAck;
     this.stripCumulativeHistory = stripCumulativeHistory;
     this.transportQueuePending = false;
@@ -61,6 +162,26 @@ export class CallController {
   event(e) {
     if (this.closed || this.closing) return;
     const at = this.now();
+    if (e.type === "recipient_hold") this.enterHold(at);
+    if (e.type === "recipient_return") this.leaveHold();
+    // Adapter-only events: silence/empty queues prove no pending playback,
+    // never that a real recipient answered a question or heard a farewell.
+    if (e.type === "output_queue_empty") this.playbackAck = true;
+    if (e.type === "recipient_answer") this.assistantQuestionPending = false;
+    if (e.type === "recipient_turn_untranscribed") {
+      this.speaking = false;
+      this.lastSpeechEnd = at;
+      if (!e.interrupted && this.suspendedClosing) {
+        this.pending ??= this.suspendedClosing.pending;
+        this.farewell ??= this.suspendedClosing.farewell;
+        this.playbackAck ||= this.suspendedClosing.playbackAck;
+      } else if (e.interrupted) {
+        this.pending = null;
+        this.farewell = null;
+        this.playbackAck = false;
+      }
+      this.suspendedClosing = null;
+    }
     if (e.type === "input_audio_buffer.speech_started") {
       this.speaking = true;
       this.suspendedClosing ??= {
@@ -100,14 +221,39 @@ export class CallController {
         this.playbackAck ||= this.suspendedClosing.playbackAck;
       }
       this.suspendedClosing = null;
+      const signal = recipientTerminalSignal(text);
+      if (signal && !this.recipientTerminal) {
+        this.recipientTerminal = { ...signal, at };
+        this.hold = null;
+        this.holdExpired = false;
+        this.holdExpiry = null;
+        this.assistantQuestionPending = false;
+      }
+      if (!this.recipientTerminal) {
+        if (isHoldRequest(fragment)) this.enterHold(at);
+        else if (
+          isHoldReturn(fragment) ||
+          ((this.hold || this.holdExpired) &&
+            !isBackchannel(fragment) &&
+            !isHoldFiller(fragment) &&
+            fragment.trim())
+        )
+          this.leaveHold();
+        else if (!this.hold && !this.holdExpired && isHoldRequest(text))
+          this.enterHold(at);
+      }
       this.recipientClosing =
+        !!this.recipientTerminal ||
         /失礼(?:いた)?します|変更しました|承れません|間違い|できません|空いていません/.test(
           text,
         );
       this.closingBlocked =
-        /お待ち|保留|確認します|質問があります|質問したい|その前|ちょっと待|hold|wait|question|[?？]/i.test(
-          text,
-        );
+        !this.recipientTerminal &&
+        !this.holdExpired &&
+        (this.hold !== null ||
+          /確認します(?:ので|から|[。\s]*$)|質問があります|質問したい|その前|ちょっと待|\bquestion\b|[?？]/i.test(
+            text,
+          ));
       const core = text.replace(
         /選択を確認できませんでした[。\s]*|もう一度|もう1度|再度/g,
         "",
@@ -179,13 +325,16 @@ export class CallController {
     if (e.type === "assistant_completed") {
       this.responseActive = false;
       if (e.no_audio) this.playbackAck = true;
-      this.assistantQuestionPending = /でしょうか|ですか|ますか|[?？]/.test(
-        e.text ?? "",
-      );
+      if (!e.no_audio && String(e.text ?? "").trim())
+        this.assistantQuestionPending ||= /でしょうか|ですか|ますか|[?？]/.test(
+          e.text,
+        );
       if (this.assistantQuestionPending) this.farewell = null;
     }
     if (
       e.type === "assistant_completed" &&
+      !this.playFarewell &&
+      !e.no_audio &&
       /失礼(?:いた)?します|失礼いたします/.test(e.text ?? "")
     ) {
       this.farewell = { at };
@@ -202,6 +351,48 @@ export class CallController {
         };
       }
     }
+  }
+  enterHold(at = this.now()) {
+    if (
+      this.recipientTerminal ||
+      this.closed ||
+      this.closing ||
+      this.holdExpired
+    )
+      return;
+    // Repeated hold announcements, music and aizuchi never refresh the lease.
+    this.hold ??= {
+      since: at,
+      deadline: at + this.maxHoldMs,
+      kind: "requested",
+    };
+    this.closingBlocked = true;
+    this.pending = null;
+    this.farewell = null;
+    this.suspendedClosing = null;
+  }
+  leaveHold() {
+    this.hold = null;
+    this.holdExpired = false;
+    this.holdExpiry = null;
+    this.closingBlocked = false;
+    if (this.pending?.reason === "hold_timeout") {
+      this.pending = null;
+      this.farewell = null;
+    }
+  }
+  actionBlock(name) {
+    if (!["read_current_menu", "press_ivr_digit"].includes(name)) return null;
+    if (this.recipientTerminal)
+      return {
+        ok: false,
+        reason: "RECIPIENT_TERMINAL",
+        outcome: terminalOutcome(this.recipientTerminal),
+        action_not_executed: true,
+      };
+    if (this.hold || this.holdExpired)
+      return { ok: false, reason: "HOLD_PENDING", action_not_executed: true };
+    return null;
   }
   async command(id, name, args) {
     if (typeof id !== "string" || !id)
@@ -222,6 +413,12 @@ export class CallController {
     if (this.operations.size >= 64)
       return { ok: false, reason: "TOOL_REQUEST_LIMIT" };
     this.operationInputs.set(id, input);
+    const blocked = this.actionBlock(name);
+    if (blocked) {
+      const work = Promise.resolve(blocked);
+      this.operations.set(id, work);
+      return work;
+    }
     if (
       name === "read_current_menu" &&
       args &&
@@ -261,6 +458,8 @@ export class CallController {
   }
   async execute(name, args, operationId) {
     if (this.closed || this.closing) return { ok: false, reason: "CLOSED" };
+    const blocked = this.actionBlock(name);
+    if (blocked) return blocked;
     if (this.systemFarewellStarted && name !== "read_current_menu")
       return { ok: false, reason: "CLOSING_PENDING" };
     if (!args || Array.isArray(args) || typeof args !== "object")
@@ -346,13 +545,35 @@ export class CallController {
       if (this.closingBlocked)
         return { ok: false, reason: "HOLD_OR_QUESTION_PENDING" };
       if (
+        this.assistantQuestionPending &&
+        !this.recipientTerminal &&
+        !this.holdExpired
+      )
+        return { ok: false, reason: "AWAITING_RECIPIENT_ANSWER" };
+      if (
         args.outcome === "unable_to_proceed" &&
+        !this.recipientTerminal &&
+        !this.holdExpired &&
         this.menu?.isIvr &&
         !this.menu.digits.length &&
         !/暗証|認証|パスワード|PIN|OTP|payment|支払/i.test(this.menu.text)
       )
         return { ok: false, reason: "MENU_NOT_COMPLETE" };
-      this.pending = { outcome: args.outcome, operationId };
+      this.pending = {
+        outcome: this.recipientTerminal
+          ? terminalOutcome(this.recipientTerminal)
+          : this.holdExpired
+            ? "unable_to_proceed"
+            : args.outcome,
+        operationId: this.holdExpired
+          ? "hold-timeout:" + this.holdExpiry.since
+          : operationId,
+        ...(this.recipientTerminal
+          ? { reason: "recipient_terminal" }
+          : this.holdExpired
+            ? { reason: "hold_timeout" }
+            : {}),
+      };
       return {
         ok: true,
         status: "CLOSURE_PENDING_FINISH_FAREWELL_THEN_REMAIN_SILENT",
@@ -363,6 +584,9 @@ export class CallController {
   menuReady() {
     return (
       !this.speaking &&
+      !this.recipientTerminal &&
+      !this.hold &&
+      !this.holdExpired &&
       !!this.menu?.complete &&
       (this.menu.digits.length > 0 ||
         /暗証|認証|パスワード|PIN|OTP/i.test(this.menu.text)) &&
@@ -373,10 +597,56 @@ export class CallController {
   }
   async tick() {
     const at = this.now();
+    if (this.closed || this.closing) {
+      for (const waiter of [...this.readWaiters, ...this.selectionWaiters])
+        waiter.resolve({ ok: false, reason: "CLOSED" });
+      this.readWaiters = [];
+      this.selectionWaiters = [];
+      return false;
+    }
+    if (this.hold && at >= this.hold.deadline) {
+      this.holdExpiry = {
+        since: this.hold.since,
+        deadline: this.hold.deadline,
+      };
+      this.hold = null;
+      this.holdExpired = true;
+      this.closingBlocked = false;
+      this.assistantQuestionPending = false;
+    }
+    // A new acoustic turn suspends pending closing. Repeated hold instructions,
+    // music or aizuchi cannot renew an expired lease or lose its stop request.
+    // A genuine return/answer explicitly clears holdExpired via leaveHold().
+    if (this.holdExpired && !this.pending) {
+      this.closingBlocked = false;
+      this.assistantQuestionPending = false;
+      this.pending = {
+        outcome: "unable_to_proceed",
+        reason: "hold_timeout",
+        operationId: "hold-timeout:" + this.holdExpiry.since,
+      };
+    }
+    if (
+      this.recipientTerminal &&
+      !this.speaking &&
+      this.lastSpeechEnd !== null &&
+      at - this.lastSpeechEnd >= 1500 &&
+      !this.pending
+    ) {
+      this.closingBlocked = false;
+      this.assistantQuestionPending = false;
+      this.pending = {
+        outcome: terminalOutcome(this.recipientTerminal),
+        reason: "recipient_terminal",
+        operationId: "recipient-terminal:" + this.recipientTerminal.kind,
+      };
+    }
     const waiting = this.readWaiters;
     this.readWaiters = [];
     for (const w of waiting) {
-      if (this.menuReady())
+      if (this.actionBlock("read_current_menu"))
+        w.resolve(this.actionBlock("read_current_menu"));
+      else if (this.menuReady())
         w.resolve(await this.execute("read_current_menu", {}));
       else if (at >= w.deadline)
         w.resolve({ ok: false, reason: "MENU_NOT_COMPLETE" });
@@ -387,6 +657,8 @@ export class CallController {
     for (const w of selections) {
       if (this.closed || this.closing)
         w.resolve({ ok: false, reason: "CLOSED" });
+      else if (this.actionBlock("press_ivr_digit"))
+        w.resolve(this.actionBlock("press_ivr_digit"));
       else if (this.menu?.token !== w.args.menu_token)
         w.resolve({ ok: false, reason: "STALE_OR_INCOMPLETE_MENU" });
       else if (this.menuReady())

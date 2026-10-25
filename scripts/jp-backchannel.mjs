@@ -1,7 +1,39 @@
 // Narrow listening-signal recognition, not authorization or task completion.
+// Context belongs to the caller: the same はい after a question is an answer.
+export const normalizeJapaneseTurn = (text) =>
+  String(text ?? "")
+    .normalize("NFKC")
+    .replace(/\u200b/g, "")
+    .trim();
+
 export const isBackchannel = (text) =>
-  /^(?:(?:はい|ええ|うん|そうですね|なるほど)[。、,!！\s]*){1,3}$/.test(
-    String(text ?? "")
-      .normalize("NFKC")
-      .trim(),
+  /^(?:あ[、,\s]+)?(?:(?:はい|はーい|ええ|ええー|うん|そうですね|なるほど)[。、,!！\s]*){1,3}$/.test(
+    normalizeJapaneseTurn(text),
+  );
+
+// Explicit conversational cues only. These do not authorize any action.
+const holdRequest =
+  /(?:少々|少し|しばらく|ちょっと|そのまま|このまま|一旦)?(?:お待ち(?:ください|下さい|いただ|頂|願)|待って(?:ください|下さい|いただ|頂)|待ちください)|保留(?:に|で|と)|please\s+(?:hold|wait)/i;
+const holdNegation =
+  /待(?:た|つ|って|ち)[^。！？]{0,30}(?:必要は(?:ありま|ございま)せん|必要(?:が|は)ない|不要|なくて(?:も|結構)|(?:いただか|頂か)なくて)/;
+const holdReturn =
+  /お待たせ(?:しました|いたしました|致しました)|お待ち(?:どうさま|どおさま)|確認(?:できました|が取れました)|もしもし|thank you for (?:holding|waiting)/i;
+// A direct first-person checking commitment commonly precedes a silent hold.
+// Require the affirmative commitment at the end, never a question or a quote.
+const verificationPause =
+  /確認(?:いたします|致します|します|(?:を)?して(?:まいります|参ります|きます)|(?:を)?させて(?:いただきます|頂きます)|を取って(?:まいります|参ります))[。.!！\s]*$/;
+export const isHoldRequest = (text) => {
+  const value = normalizeJapaneseTurn(text);
+  const implicit =
+    !/[「」『』“”"]/.test(value) && verificationPause.test(value);
+  return (holdRequest.test(value) || implicit) && !holdNegation.test(value);
+};
+export const isHoldReturn = (text) =>
+  holdReturn.test(normalizeJapaneseTurn(text));
+const ongoingWaitApology =
+  /^(?:(?:大変|長らく|長時間)[、,\s]*)?お待たせ(?:しております|しています|して(?:しまい)?(?:申し訳(?:ございません|ありません)|すみません))(?:[。.!！\s]*(?:大変)?申し訳(?:ございません|ありません))?[。.!！\s]*$/;
+export const isHoldFiller = (text) =>
+  ongoingWaitApology.test(normalizeJapaneseTurn(text)) ||
+  /^(?:\[(?:music|hold music|silence|long silence|音楽|保留音|無音)\]|\((?:music|hold music|silence|long silence|音楽|保留音|無音)\)|音楽|保留音|無音)[。、.\s]*$/i.test(
+    normalizeJapaneseTurn(text),
   );

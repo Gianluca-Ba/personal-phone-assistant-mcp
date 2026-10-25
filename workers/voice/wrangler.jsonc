@@ -4,6 +4,7 @@
   "compatibility_date": "2026-10-01",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
+  "preview_urls": false,
   "observability": { "enabled": false },
   "durable_objects": {
     "bindings": [{ "name": "VOICE_SESSIONS", "class_name": "VoiceSession" }],
@@ -24,6 +25,7 @@
     "VOICE_DIAGNOSTICS_ENABLED": "false",
     "OUTBOUND_DTMF_DURATION_MS": "250",
     "OUTBOUND_IVR_TRANSITION_TIMEOUT_MS": "45000",
+    "OUTBOUND_MAX_UTTERANCE_SECONDS": "12",
     "PSTN_PILOT_VERIFIED": "false",
     "VOICE_ORIGIN": "https://personal-phone-assistant-voice.barsaglini-gianluca.workers.dev",
     "OUTBOUND_ASSISTANT_ID": "",

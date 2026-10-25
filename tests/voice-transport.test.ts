@@ -796,3 +796,487 @@ it("lets a current IVR sentence finish before the no-transition close, without w
   await f.b.checkIvrDeadline();
   expect(f.network.filter((n) => n.url.endsWith("/speak"))).toHaveLength(1);
 });
+
+async function dialogueFixture() {
+  const f = fixture();
+  f.env.EXTERNAL_STT = "true";
+  f.env.CONTROLLED_FAREWELL = "true";
+  await f.register();
+  const media = new Socket();
+  await f.b.attachMedia(media);
+  await f.b.bindCall("bound-call");
+  f.b.streamId = "stream";
+  f.b.voice = new Socket();
+  await f.b.onVoice({
+    type: "session.created",
+    session: {
+      conversation_id: "isolated-dialogue",
+      audio: {
+        input: { format: { rate: 8000 } },
+        output: { format: { rate: 8000 } },
+      },
+    },
+  });
+  const generate = async (id: string, text: string, bytes = 3200) => {
+    await f.b.onVoice({ type: "response.created", response: { id } });
+    await f.b.onVoice({
+      type: "response.output_audio.delta",
+      response_id: id,
+      delta: Buffer.alloc(bytes).toString("base64"),
+    });
+    if (text)
+      await f.b.onVoice({
+        type: "response.output_audio_transcript.delta",
+        response_id: id,
+        delta: text,
+      });
+    await f.b.onVoice({
+      type: "response.done",
+      response: { id, status: "completed" },
+    });
+  };
+  const recipient = (text: string) => {
+    f.b.beginTurn();
+    f.b.deliverTranscript(text);
+  };
+  return { ...f, media, generate, recipient };
+}
+it("holds audio until the complete utterance is checked, then releases every frame once", async () => {
+  const f = await dialogueFixture();
+  await f.b.onVoice({ type: "response.created", response: { id: "bounded" } });
+  await f.b.onVoice({
+    type: "response.output_audio.delta",
+    response_id: "bounded",
+    delta: Buffer.alloc(3200).toString("base64"),
+  });
+  expect(f.media.frames.filter((m: any) => m.event === "media")).toHaveLength(
+    0,
+  );
+  f.advance(500);
+  await f.b.onVoice({
+    type: "response.output_audio_transcript.delta",
+    response_id: "bounded",
+    delta: "次回の入荷予定は分かりますか。",
+  });
+  expect(f.media.frames.filter((m: any) => m.event === "media")).toHaveLength(
+    0,
+  );
+  await f.b.onVoice({
+    type: "response.done",
+    response: { id: "bounded", status: "completed" },
+  });
+  expect(f.media.frames.filter((m: any) => m.event === "media")).toHaveLength(
+    10,
+  );
+  expect(f.media.frames.filter((m: any) => m.event === "mark")).toHaveLength(1);
+  expect(f.b.controller.responseActive).toBe(false);
+  await f.b.onVoice({ type: "response.created", response: { id: "bounded" } });
+  await f.b.onVoice({
+    type: "response.done",
+    response: { id: "bounded", status: "completed" },
+  });
+  expect(f.b.controller.responseActive).toBe(false);
+  expect(f.media.frames.filter((m: any) => m.event === "media")).toHaveLength(
+    10,
+  );
+});
+it("does not leak even a safe prefix before a late Call Summary or operational comment", async () => {
+  for (const text of [
+    "ありがとうございます。失礼いたします。【Call Summary v2】電話応答：営業時間外。",
+    "（相手がまだ話しているため、こちらからは何も発言せず、案内が終わるのを待ちます。",
+  ]) {
+    const f = await dialogueFixture();
+    await f.generate("blocked", text);
+    expect(f.media.frames.some((m: any) => m.event === "media")).toBe(false);
+    expect(f.b.responses.get("blocked").guardRejected).toBe(true);
+    expect(f.b.controller.responseActive).toBe(false);
+    expect(
+      f.network.some((n: any) => n.url === "https://api.telnyx.com/v2/calls"),
+    ).toBe(false);
+  }
+});
+it("rejects untranscribed audio and caps audio duration and unfinished generations", async () => {
+  const f = await dialogueFixture();
+  await f.generate("no-text", "");
+  expect(f.b.responses.get("no-text").blockReason).toBe("missing_transcript");
+  f.env.OUTBOUND_MAX_UTTERANCE_SECONDS = "3";
+  await f.b.onVoice({ type: "response.created", response: { id: "long" } });
+  await f.b.onVoice({
+    type: "response.output_audio.delta",
+    response_id: "long",
+    delta: Buffer.alloc(8000 * 2 * 4).toString("base64"),
+  });
+  expect(f.b.responses.get("long").chunks).toEqual([]);
+  expect(f.b.responses.get("long").blockReason).toBe("utterance_length_limit");
+  await f.b.onVoice({ type: "response.created", response: { id: "stalled" } });
+  f.advance(15001);
+  await f.b.checkDialogue();
+  expect(f.b.responses.get("stalled").blockReason).toBe("generation_timeout");
+  expect(f.media.frames.some((m: any) => m.event === "media")).toBe(false);
+});
+it("treats hai after a completed question as an answer even when its playback ACK is delayed", async () => {
+  const f = await dialogueFixture();
+  await f.generate("question", "予約は明日の18時でよろしいですか。");
+  f.advance(1000);
+  expect(f.b.marks.pending.size).toBe(1);
+  f.recipient("はい。");
+  expect(
+    f.b.voice.frames.some(
+      (m: any) =>
+        m.item?.role === "user" && m.item.content[0].text === "はい。",
+    ),
+  ).toBe(true);
+  expect(f.b.context.filtered_aizuchi ?? 0).toBe(0);
+  expect(f.b.controller.assistantQuestionPending).toBe(false);
+});
+it("preserves a listening aizuchi during real playback but yields for a correction", async () => {
+  const f = await dialogueFixture();
+  await f.generate("answer", "明日は18時に空きがあります。", 8000 * 2 * 2);
+  const before = f.media.frames.filter((m: any) => m.event === "clear").length;
+  f.recipient("ええ。");
+  expect(f.b.context.filtered_aizuchi).toBe(1);
+  expect(f.media.frames.filter((m: any) => m.event === "clear")).toHaveLength(
+    before,
+  );
+  f.recipient("すみません、18時ではなく19時です。");
+  expect(f.media.frames.filter((m: any) => m.event === "clear")).toHaveLength(
+    before + 1,
+  );
+});
+it("waits silently for explicit stock checking and resumes on the real answer", async () => {
+  const f = await dialogueFixture();
+  f.recipient("在庫を確認いたします。");
+  expect(f.b.controller.hold).not.toBeNull();
+  const deadline = f.b.controller.hold.deadline;
+  f.advance(30000);
+  await f.b.checkDialogue();
+  await f.generate("hold-comment", "少々お待ちください。");
+  expect(f.media.frames.some((m: any) => m.event === "media")).toBe(false);
+  expect(f.network.some((n: any) => n.url.endsWith("/speak"))).toBe(false);
+  f.recipient("はい。");
+  expect(f.b.controller.hold.deadline).toBe(deadline);
+  f.advance(1000);
+  f.recipient("お待たせしました。在庫はございません。");
+  expect(f.b.controller.hold).toBeNull();
+  await f.generate("follow-up", "次回の入荷日は分かりますか。");
+  expect(f.media.frames.some((m: any) => m.event === "media")).toBe(true);
+});
+it("closes after a closed-store announcement without a keypad action or spoken report", async () => {
+  const f = await dialogueFixture();
+  f.recipient(
+    "ただ今の時間は営業しておりません。営業時間内におかけ直してください。",
+  );
+  f.advance(1600);
+  await f.b.checkDialogue();
+  await f.b.checkDialogue();
+  const closing = f.b.context.controlled_closing;
+  expect(closing).toBeTruthy();
+  f.recipient(
+    "ストアの営業時間やアクセスのご案内については一を押してください。",
+  );
+  const m = await f.b.controller.command(
+    "read-after-close",
+    "read_current_menu",
+    {},
+  );
+  expect(m.reason).toBe("RECIPIENT_TERMINAL");
+  await f.generate(
+    "report",
+    "ありがとうございます。失礼いたします。【Call Summary v2】",
+  );
+  expect(f.media.frames.some((x: any) => x.event === "media")).toBe(false);
+  expect(f.network.some((n: any) => n.url.endsWith("/send_dtmf"))).toBe(false);
+  expect(f.network.filter((n: any) => n.url.endsWith("/speak"))).toHaveLength(
+    1,
+  );
+  expect(f.network.some((n: any) => n.url.endsWith("/hangup"))).toBe(false);
+});
+it("a real question before farewell dispatch cancels pending closure and permits a reply", async () => {
+  const f = await dialogueFixture();
+  f.b.controller.event({ type: "input_audio_buffer.speech_stopped" });
+  await f.b.onVoice({
+    type: "conversation.item.created",
+    item: {
+      type: "function_call",
+      name: "finish_call_after_goodbye",
+      arguments: '{"outcome":"confirmed"}',
+      call_id: "premature-close",
+    },
+  });
+  expect(f.b.context.controlled_close_requested).toBe(true);
+  f.recipient("すみません、お名前を教えていただけますか。");
+  expect(f.b.context.controlled_close_requested).toBe(false);
+  expect(f.b.controller.pending).toBeNull();
+  await f.generate("identity", "自動音声の電話アシスタントです。");
+  expect(f.media.frames.some((m: any) => m.event === "media")).toBe(true);
+  expect(f.network.some((n: any) => n.url.endsWith("/hangup"))).toBe(false);
+});
+it("a text-only goodbye never bypasses the system-controlled farewell", async () => {
+  const f = await dialogueFixture();
+  f.recipient("ありがとうございました。失礼します。");
+  f.advance(1000);
+  await f.generate("goodbye", "ありがとうございます。失礼いたします。", 0);
+  await f.b.checkDialogue();
+  expect(f.network.filter((n: any) => n.url.endsWith("/speak"))).toHaveLength(
+    1,
+  );
+  expect(f.network.some((n: any) => n.url.endsWith("/hangup"))).toBe(false);
+});
+it("survives an empty STT end during a controlled farewell and still requires its matching completed callback", async () => {
+  const f = await dialogueFixture();
+  f.recipient("本日は営業しておりません。");
+  f.advance(2000);
+  await f.b.checkDialogue();
+  await f.b.checkDialogue();
+  const state = f.b.context.controlled_closing.state;
+  f.b.turns.accept({
+    type: "TurnInfo",
+    request_id: "recognizer",
+    turn_index: 1,
+    event: "StartOfTurn",
+  });
+  f.b.turns.accept({
+    type: "TurnInfo",
+    request_id: "recognizer",
+    turn_index: 1,
+    event: "EndOfTurn",
+    transcript: "",
+  });
+  const event = {
+    id: crypto.randomUUID(),
+    event_type: "call.speak.ended",
+    occurred_at: new Date().toISOString(),
+    payload: {
+      connection_id: f.env.VOICE_APP_ID,
+      call_control_id: "bound-call",
+      client_state: state,
+      status: "completed",
+    },
+  };
+  await f.b.onWebhook(event);
+  f.advance(2000);
+  await f.b.checkDialogue();
+  expect(f.network.filter((n: any) => n.url.endsWith("/hangup"))).toHaveLength(
+    1,
+  );
+});
+it("checks initial carrier silence once and hangs up only after a completed check and farewell", async () => {
+  const f = await dialogueFixture();
+  f.b.lastMediaAt = Date.now();
+  f.advance(25001);
+  f.b.lastMediaAt = f.b.now();
+  await f.b.checkDialogue();
+  const attention = f.b.context.attention;
+  expect(attention).toBeTruthy();
+  const event = (state: string) => ({
+    id: crypto.randomUUID(),
+    event_type: "call.speak.ended",
+    occurred_at: new Date().toISOString(),
+    payload: {
+      connection_id: f.env.VOICE_APP_ID,
+      call_control_id: "bound-call",
+      client_state: state,
+      status: "completed",
+    },
+  });
+  await f.b.onWebhook(event(attention.state));
+  f.advance(15001);
+  await f.b.checkDialogue();
+  await f.b.checkDialogue();
+  expect(f.network.filter((n: any) => n.url.endsWith("/speak"))).toHaveLength(
+    2,
+  );
+  const farewell = f.b.context.controlled_closing;
+  expect(farewell).toBeTruthy();
+  expect(f.network.some((n: any) => n.url.endsWith("/hangup"))).toBe(false);
+  await f.b.onWebhook(event(farewell.state));
+  f.advance(1000);
+  await f.b.checkDialogue();
+  expect(f.network.filter((n: any) => n.url.endsWith("/hangup"))).toHaveLength(
+    1,
+  );
+});
+it("does not arm an attention timeout after the signed completion arrived during dispatch", async () => {
+  vi.useFakeTimers();
+  const f = await dialogueFixture();
+  let resolve: any, started: any;
+  const dispatched = new Promise((r) => (started = r));
+  f.b.voiceAPI = () => {
+    started();
+    return new Promise((r) => (resolve = r));
+  };
+  const work = f.b.playAttention();
+  await dispatched;
+  const attention = f.b.context.attention;
+  attention.completed = true;
+  f.b.silence.checkCompleted();
+  resolve({ ok: true });
+  await work;
+  expect(f.b.attentionDeadline).toBeUndefined();
+  await vi.advanceTimersByTimeAsync(21000);
+  expect(f.b.context.failure).toBeUndefined();
+});
+it("preserves the original approved task while applying the trusted spoken policy to the supported session variable", async () => {
+  const f = fixture();
+  await f.register();
+  await f.b.openVoice();
+  const update = f.b.voice.frames.find((m: any) => m.type === "session.update");
+  expect(update.session.assistant.dynamic_variables.outbound_task).toContain(
+    "AUTHORIZED_TASK_JSON=" +
+      JSON.stringify({ authorized_task: f.row.instructions }),
+  );
+  expect(f.b.context.instructions).toBe(f.row.instructions);
+  expect(update.session.assistant.dynamic_variables.outbound_task).toContain(
+    "NEVER speak a report",
+  );
+});
+it("does not speak a farewell cancelled while its persistence is still pending", async () => {
+  const f = await dialogueFixture();
+  const original = f.b.persist.bind(f.b);
+  let release: any,
+    first = true;
+  f.b.persist = async () => {
+    if (first) {
+      first = false;
+      await new Promise((r) => (release = r));
+    } else await original();
+  };
+  const play = f.b.playControlledFarewell("confirmed", {
+    operationId: "race-before-post",
+  });
+  await Promise.resolve();
+  await f.b.cancelControlledFarewell();
+  release();
+  await play;
+  expect(f.b.context.controlled_closing.cancelled).toBe(true);
+  expect(f.network.some((n: any) => n.url.endsWith("/speak"))).toBe(false);
+});
+it("an early answer to the presence check is forwarded and prevents a stale timeout after dispatch", async () => {
+  const f = await dialogueFixture();
+  let release: any, started: any;
+  const dispatched = new Promise((r) => (started = r));
+  const actions: string[] = [];
+  f.b.voiceAPI = async (action: string) => {
+    actions.push(action);
+    if (action === "speak") started();
+    return action === "speak"
+      ? new Promise((r) => (release = r))
+      : { ok: true };
+  };
+  const play = f.b.playAttention();
+  await dispatched;
+  f.recipient("はい、聞こえています。");
+  release({ ok: true });
+  await play;
+  await Promise.resolve();
+  expect(f.b.context.attention.cancelled).toBe(true);
+  expect(f.b.attentionDeadline).toBeUndefined();
+  expect(
+    f.b.voice.frames.some(
+      (m: any) =>
+        m.item?.role === "user" &&
+        m.item.content[0].text === "はい、聞こえています。",
+    ),
+  ).toBe(true);
+  expect(actions.filter((x) => x === "speak")).toHaveLength(1);
+});
+it("does not certify task success or call a keypad action from a silent hold timeout", async () => {
+  const f = await dialogueFixture();
+  f.recipient("少々お待ちください。");
+  const deadline = f.b.controller.hold.deadline;
+  f.advance(90001);
+  await f.b.checkDialogue();
+  await f.b.checkDialogue();
+  expect(f.b.controller.holdExpired).toBe(true);
+  expect(f.b.controller.pending.outcome).toBe("unable_to_proceed");
+  expect(f.b.context.controlled_closing.outcome).toBe("unable_to_proceed");
+  f.recipient("そのままお待ちください。");
+  f.advance(1600);
+  await f.b.checkDialogue();
+  expect(f.b.controller.hold).toBeNull();
+  expect(f.b.controller.holdExpiry.deadline).toBe(deadline);
+  expect(f.network.some((n: any) => n.url.endsWith("/send_dtmf"))).toBe(false);
+  expect(f.network.filter((n: any) => n.url.endsWith("/speak"))).toHaveLength(
+    1,
+  );
+});
+it("does not retain oversized or late text chunks after rejecting a response", async () => {
+  const f = await dialogueFixture();
+  await f.b.onVoice({ type: "response.created", response: { id: "text-cap" } });
+  await f.b.onVoice({
+    type: "response.output_audio_transcript.delta",
+    response_id: "text-cap",
+    delta: "検証".repeat(3000),
+  });
+  for (let i = 0; i < 5; i++)
+    await f.b.onVoice({
+      type: "response.output_audio_transcript.delta",
+      response_id: "text-cap",
+      delta: "late".repeat(2000),
+    });
+  expect(f.b.responses.get("text-cap").text.length).toBeLessThanOrEqual(3000);
+  expect(f.b.spokenBlocks).toBe(1);
+  expect(f.media.frames.some((m: any) => m.event === "media")).toBe(false);
+});
+it("serializes an old farewell stop before a new farewell generation", async () => {
+  const f = await dialogueFixture();
+  let release: any, started: any;
+  const dispatched = new Promise((r) => (started = r));
+  const actions: string[] = [];
+  let first = true;
+  f.b.voiceAPI = async (action: string) => {
+    actions.push(action);
+    if (action === "speak" && first) {
+      first = false;
+      started();
+      return new Promise((r) => (release = r));
+    }
+    return { ok: true };
+  };
+  const old = f.b.playControlledFarewell("unable_to_proceed", {
+    operationId: "closing-reason",
+  });
+  await dispatched;
+  const cancel = f.b.cancelControlledFarewell();
+  const next = f.b.playControlledFarewell("unable_to_proceed", {
+    operationId: "closing-reason",
+  });
+  release({ ok: true });
+  await Promise.all([old, cancel, next]);
+  expect(actions).toEqual(["speak", "playback_stop", "speak"]);
+  expect(f.b.context.farewell_generation).toBe(2);
+  expect(f.b.context.controlled_closing.cancelled).toBe(false);
+});
+it("bounds a missing controlled-farewell callback without arming a timer after an early completed callback", async () => {
+  vi.useFakeTimers();
+  const f = await dialogueFixture();
+  let release: any, started: any;
+  const dispatched = new Promise((r) => (started = r));
+  f.b.voiceAPI = async (action: string) => {
+    if (action === "speak") {
+      started();
+      return new Promise((r) => (release = r));
+    }
+    return { ok: true };
+  };
+  const play = f.b.playControlledFarewell("confirmed", {
+    operationId: "early-completion",
+  });
+  await dispatched;
+  f.b.context.controlled_closing.completed = true;
+  f.b.context.system_farewell_played = true;
+  release({ ok: true });
+  await play;
+  expect(f.b.controlledFarewellDeadline).toBeUndefined();
+  f.b.context.system_farewell_played = false;
+  f.b.voiceAPI = async () => ({ ok: true });
+  let failure: string | undefined;
+  f.b.fail = async (reason: string) => {
+    failure = reason;
+  };
+  await f.b.playControlledFarewell("confirmed", {
+    operationId: "missing-callback",
+  });
+  await vi.advanceTimersByTimeAsync(20001);
+  expect(failure).toBe("farewell_playback_unconfirmed");
+});

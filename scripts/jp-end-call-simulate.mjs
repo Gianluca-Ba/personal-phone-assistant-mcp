@@ -1,5 +1,6 @@
 // Audio-only virtual test of the native hangup path; no public phone numbers.
 import { CallController } from "./jp-call-controller.mjs";
+import { forwardLabRecipientEvent } from "./jp-lab-turns.mjs";
 import { evaluateRun, evaluateGuardedRun } from "./jp-voice-verdict.mjs";
 import { PlaybackClock } from "./jp-playback-clock.mjs";
 import { dtmfAttempts } from "./jp-ivr-tools.mjs";
@@ -7,6 +8,7 @@ import WebSocket from "ws";
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
+
 const variant = process.env.JP_LAB_VARIANT ?? "endcall";
 if (!/^[a-z0-9-]+$/.test(variant)) throw new Error("Invalid lab variant");
 const root = ".wrangler/jp-voice";
@@ -23,6 +25,17 @@ if (
   )
 )
   throw new Error("Isolated end-call assistant required");
+// This runner estimates a frontend-spoken farewell and has no playFarewell
+// transport. Do not silently test a system-farewell prompt against that route.
+if (
+  config.tools.every((tool) => tool.type === "client_side_tool") &&
+  /system(?:-controlled| (?:will )?plays?)[^\n]{0,120}(?:farewell|失礼)/i.test(
+    config.instructions ?? "",
+  )
+)
+  throw new Error(
+    "System-controlled farewell requires the bridge lab; this runner supports the legacy frontend-spoken farewell only",
+  );
 const cases = JSON.parse(
   readFileSync(
     process.env.JP_SCENARIOS_FILE ?? "voice/jp/end-call-scenarios.json",
@@ -84,7 +97,9 @@ for (const s of cases.filter((s) => selected.includes(s.id))) {
       clientClosed = false,
       playback = new PlaybackClock(),
       closeTimer,
-      closedByController = false;
+      closedByController = false,
+      recipientOverlapped = false,
+      recipientAnswerWindow = false;
     const now = () => performance.now() - start;
     const record = (e) => events.push({ at_ms: now(), ...e });
     const ws = new WebSocket(
@@ -144,7 +159,22 @@ for (const s of cases.filter((s) => selected.includes(s.id))) {
     ws.on("message", (raw) => {
       const m = JSON.parse(raw.toString());
       const rid = m.response_id ?? m.response?.id;
-      controller.event(m);
+      if (m.type === "input_audio_buffer.speech_started") {
+        const remaining = playback.remaining(now());
+        recipientOverlapped = remaining > 0;
+        recipientAnswerWindow =
+          controller.assistantQuestionPending &&
+          !controller.responseActive &&
+          remaining <= 500;
+      }
+      forwardLabRecipientEvent(controller, m, {
+        overlapped: recipientOverlapped,
+        answerWindow: recipientAnswerWindow,
+      });
+      if (m.type === "conversation.item.input_audio_transcription.completed") {
+        recipientOverlapped = false;
+        recipientAnswerWindow = false;
+      }
       if (
         m.type === "conversation.item.created" &&
         m.item?.type === "function_call"

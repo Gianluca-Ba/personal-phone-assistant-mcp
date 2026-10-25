@@ -51,6 +51,16 @@ export function progressEvidence(baseline, transcript, seen = []) {
       return null;
     return { kind: "changed_menu", digest: sha256(text) };
   }
+  // A fact-bearing automatic announcement is observable progress even when it
+  // does not introduce another numbered menu. It is not proof of a human or of
+  // the accuracy of ASR-derived address/time details.
+  if (
+    !ivr.test(transcript) &&
+    /(?:住所|所在地)(?:は|が).{4,120}(?:です|でございます)|(?:当店|店舗|ストア|弊社).{0,16}(?:は|が).{4,80}(?:にあります|にございます)|.{2,40}(?:の近く|付近|隣|向かい).{0,16}(?:にあります|にございます|です)|(?:営業(?:時間)?|開店|閉店)(?:は|時刻は|時間は).{0,60}[0-9０-９一二三四五六七八九十]{1,4}時|(?:our )?(?:address is|located at)|(?:business|opening) hours (?:are|is).{0,60}\d/i.test(
+      transcript,
+    )
+  )
+    return { kind: "information_announcement", digest: sha256(text) };
   if (
     !ivr.test(transcript) &&
     /お待たせ(?:いた)?しました|担当の.{1,12}(?:です|でございます)|ご用件(?:を|は)|どのような/.test(
