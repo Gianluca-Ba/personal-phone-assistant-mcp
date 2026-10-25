@@ -1280,3 +1280,109 @@ it("bounds a missing controlled-farewell callback without arming a timer after a
   await vi.advanceTimersByTimeAsync(20001);
   expect(failure).toBe("farewell_playback_unconfirmed");
 });
+
+it("preserves a listening aizuchi during later playback after a presence check has already completed", async () => {
+  const f = await dialogueFixture();
+  f.b.context.attention = {
+    state: "completed-attention",
+    cancelled: false,
+    completed: true,
+  };
+  await f.generate(
+    "answer-after-check",
+    "明日は18時に空きがあります。",
+    8000 * 2 * 2,
+  );
+  const clears = f.media.frames.filter((m: any) => m.event === "clear").length;
+  const userItems = f.b.voice.frames.filter(
+    (m: any) => m.item?.role === "user",
+  ).length;
+  f.recipient("はい。");
+  expect(f.b.context.filtered_aizuchi).toBe(1);
+  expect(f.media.frames.filter((m: any) => m.event === "clear")).toHaveLength(
+    clears,
+  );
+  expect(
+    f.b.voice.frames.filter((m: any) => m.item?.role === "user"),
+  ).toHaveLength(userItems);
+  expect(f.b.responses.get("answer-after-check").suppressed).toBe(false);
+});
+
+it("does not cancel or renew an expired silent hold farewell for music/filler recognition events", async () => {
+  const f = await dialogueFixture();
+  f.recipient("少々お待ちください。");
+  const deadline = f.b.controller.hold.deadline;
+  f.advance(90001);
+  await f.b.checkDialogue();
+  await f.b.checkDialogue();
+  const closing = f.b.context.controlled_closing;
+  expect(closing).toBeTruthy();
+  const userItems = f.b.voice.frames.filter(
+    (m: any) => m.item?.role === "user",
+  ).length;
+  for (const text of ["[Music]", "保留音", "[Long silence]"]) {
+    f.recipient(text);
+    f.advance(800);
+    await f.b.checkDialogue();
+    expect(f.b.controller.hold).toBeNull();
+    expect(f.b.controller.holdExpired).toBe(true);
+    expect(f.b.controller.holdExpiry.deadline).toBe(deadline);
+    expect(f.b.context.controlled_closing).toBe(closing);
+    expect(closing.cancelled).toBe(false);
+  }
+  expect(f.network.filter((n: any) => n.url.endsWith("/speak"))).toHaveLength(
+    1,
+  );
+  expect(f.network.some((n: any) => n.url.endsWith("/playback_stop"))).toBe(
+    false,
+  );
+  expect(
+    f.b.voice.frames.filter((m: any) => m.item?.role === "user"),
+  ).toHaveLength(userItems);
+});
+
+it("keeps an ongoing wait apology silent through interim/final STT but hears the distinct genuine return", async () => {
+  const f = await dialogueFixture();
+  f.recipient("少々お待ちください。");
+  f.advance(90001);
+  await f.b.checkDialogue();
+  await f.b.checkDialogue();
+  const closing = f.b.context.controlled_closing;
+  const userItems = f.b.voice.frames.filter(
+    (m: any) => m.item?.role === "user",
+  ).length;
+  f.b.turns.accept({ type: "TurnInfo", event: "StartOfTurn", turn_index: 81 });
+  f.b.turns.accept({
+    type: "TurnInfo",
+    event: "Update",
+    turn_index: 81,
+    transcript: "お待たせしてすみません。",
+  });
+  expect(f.b.cancelledForTurn).toBe(false);
+  expect(closing.cancelled).toBe(false);
+  f.b.turns.accept({
+    type: "TurnInfo",
+    event: "EndOfTurn",
+    turn_index: 81,
+    transcript: "お待たせしてすみません。",
+  });
+  expect(f.b.cancelledForTurn).toBe(false);
+  expect(closing.cancelled).toBe(false);
+  expect(f.b.controller.holdExpired).toBe(true);
+  expect(
+    f.b.voice.frames.filter((m: any) => m.item?.role === "user"),
+  ).toHaveLength(userItems);
+  f.recipient("お待たせしました。すみません。");
+  expect(f.b.controller.holdExpired).toBe(false);
+  expect(closing.cancelled).toBe(true);
+  expect(
+    f.b.voice.frames.filter((m: any) => m.item?.role === "user"),
+  ).toHaveLength(userItems + 1);
+  expect(f.b.controller.pending).toBeNull();
+  await f.generate(
+    "real-return-answer",
+    "ご確認ありがとうございます。予約なしで購入できますか。",
+  );
+  expect(f.media.frames.some((m: any) => m.event === "media")).toBe(true);
+  expect(f.network.some((n: any) => n.url.endsWith("/hangup"))).toBe(false);
+});

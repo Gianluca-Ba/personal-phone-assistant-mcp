@@ -314,13 +314,20 @@ it("uncertain creation and approval keep durable reservations and are never retr
   expect((await stats()).approve).toBe(after.approve);
   expect(await a.status(actor)).toHaveProperty("state", "unknown");
 });
-it("rate limits apply across requests and clients for the owner", async () => {
-  const q = stub("isolated-test-quota");
-  for (let i = 0; i < 100; i++) await q.rateLimit(actor, "approve");
-  await expect(
-    q.rateLimit({ ...actor, clientId: "different" }, "approve"),
-  ).rejects.toThrow("RATE_LIMITED");
-});
+it(
+  "rate limits apply across requests and clients for the owner",
+  // 101 sequential loopback/DO RPCs include durable storage transactions; the
+  // default 5 s is unreliable on shared CI runners. Keep the real quota and
+  // every request/assertion unchanged, and bound only this integration test.
+  { timeout: 30_000 },
+  async () => {
+    const q = stub("isolated-test-quota");
+    for (let i = 0; i < 100; i++) await q.rateLimit(actor, "approve");
+    await expect(
+      q.rateLimit({ ...actor, clientId: "different" }, "approve"),
+    ).rejects.toThrow("RATE_LIMITED");
+  },
+);
 it("MCP scope checks and schema reject model-supplied confirmations and legacy web RPC is inert", async () => {
   const resource =
     "https://personal-phone-assistant-mcp.barsaglini-gianluca.workers.dev/mcp";

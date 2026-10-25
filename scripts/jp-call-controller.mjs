@@ -215,7 +215,11 @@ export class CallController {
       this.lastTranscript = at;
       const text = this.inputText;
       const previousMenu = this.menu;
-      if (isBackchannel(text) && this.suspendedClosing) {
+      if (
+        (isBackchannel(text) ||
+          ((this.hold || this.holdExpired) && isHoldFiller(fragment))) &&
+        this.suspendedClosing
+      ) {
         this.pending = this.suspendedClosing.pending;
         this.farewell ??= this.suspendedClosing.farewell;
         this.playbackAck ||= this.suspendedClosing.playbackAck;

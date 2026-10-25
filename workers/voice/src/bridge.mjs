@@ -8,7 +8,10 @@ import {
 } from "./turns.mjs";
 import { composeOutboundTask, speechViolation } from "./spoken-policy.mjs";
 import { SilenceWatchdog } from "./silence.mjs";
-import { isBackchannel } from "../../../scripts/jp-backchannel.mjs";
+import {
+  isBackchannel,
+  isHoldFiller,
+} from "../../../scripts/jp-backchannel.mjs";
 import { CallController } from "../../../scripts/jp-call-controller.mjs";
 import { PlaybackMarks } from "../../../scripts/jp-playback-marks.mjs";
 import { decodeMuLaw, MuLawEncoder } from "./audio.mjs";
@@ -859,7 +862,9 @@ export class VoiceBridge {
       this.controller.assistantQuestionPending &&
       this.controller.playback.remaining(this.now()) <= 0;
     const answeringAttention =
-      !!this.context.attention && !this.context.attention.cancelled;
+      !!this.context.attention &&
+      !this.context.attention.cancelled &&
+      !this.context.attention.completed;
     this.overlapped =
       this.speakingOutput() &&
       !answeringCompletedQuestion &&
@@ -868,8 +873,15 @@ export class VoiceBridge {
     this.silence.activity();
     this.controller.event({ type: "input_audio_buffer.speech_started" });
   }
+  currentHoldFiller(text) {
+    return !!(
+      (this.controller?.hold || this.controller?.holdExpired) &&
+      isHoldFiller(text)
+    );
+  }
   deliverTranscript(text) {
     if (this.ended || this.failing) return;
+    const holdFiller = this.currentHoldFiller(text);
     if (this.controller.speaking)
       this.controller.event({ type: "input_audio_buffer.speech_stopped" });
     this.controller.event({
@@ -877,7 +889,7 @@ export class VoiceBridge {
       transcript: text,
     });
     const turn = classifyRecipientTurn(text, { overlapped: this.overlapped });
-    const listening = turn.kind === "backchannel";
+    const listening = turn.kind === "backchannel" || holdFiller;
     const expiredHoldRepeated =
       this.controller.holdExpired && turn.kind === "hold_request";
     if (!listening) {
@@ -1035,7 +1047,12 @@ export class VoiceBridge {
       this.turns = new SttTurns({
         onStart: () => this.beginTurn(),
         onInterim: (text) => {
-          if (this.overlapped && genuineInterruption(text)) this.cancelOutput();
+          if (
+            this.overlapped &&
+            !this.currentHoldFiller(text) &&
+            genuineInterruption(text)
+          )
+            this.cancelOutput();
         },
         onFinal: (text) => {
           this.deliverTranscript(text);
