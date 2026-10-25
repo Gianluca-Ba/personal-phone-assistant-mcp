@@ -1,99 +1,103 @@
-# Outbound con autorizzazione firmata per singola chiamata
+# Outbound con conferma nella conversazione
 
-## Limite del client e soluzione implementata
+## Flusso attuale
 
-La [documentazione ufficiale OpenAI](https://developers.openai.com/plugins/reference) descrive le annotazioni come indicazioni per l’interfaccia e richiede che il server applichi l’autorizzazione. Non documenta una ricevuta di consenso ChatGPT firmata, verificabile dal server e vincolata alla singola chiamata. Non si assume che un pulsante, un messaggio, OAuth, elicitation o `_meta` costituiscano tale prova. `verifiedNativeConsent()` resta chiuso (`null`).
+1. L’utente chiede una telefonata.
+2. ChatGPT invoca `create_outbound_request` con una `request_key` UUID stabile. Non viene avviata alcuna telefonata.
+3. ChatGPT presenta numero E.164, lingua, obiettivo e istruzioni canoniche complete, insieme a ID e scadenza della richiesta.
+4. **Attende un nuovo messaggio esplicito dell’utente che approvi proprio quella richiesta.** La richiesta iniziale di chiamare non sostituisce questa conferma. Se cambiano i dettagli, prepara una nuova richiesta e chiede una nuova approvazione.
+5. Solo dopo quel messaggio invoca `approve_outbound_request` con i dettagli originali, nonce e digest; resta soggetto alla conferma nativa del tool quando richiesta dal client.
+6. MCP controlla autorizzazione e integrità della richiesta, inoltra l’approvazione al Worker telefonico e rende consultabile lo stato con `get_outbound_status`.
 
-La soluzione alternativa implementata è una **firma Ed25519 del proprietario per ciascuna richiesta**. Non usa pagine web, email, SMS o nuovi servizi. Richiede un’interazione aggiuntiva sul Mac: il proprietario esegue un programma locale, legge tutti i dettagli, digita `APPROVO <numero>` e sblocca la propria chiave cifrata con una passphrase. Riporta in un nuovo messaggio ChatGPT soltanto la firma monouso. Non può quindi essere presentato come un flusso esclusivamente conversazionale.
+Non servono firme, chiavi, Terminale, copie di codici o pagine web per approvare una telefonata. Il precedente programma `scripts/owner-consent.mjs` e il verificatore Ed25519 sono stati rimossi. Le chiavi locali già create non vengono lette né cancellate: non sono più usate dal progetto.
 
-Il server verifica il possesso della chiave configurata, non la provenienza di un messaggio o l’identità fisica della persona alla tastiera. La garanzia dipende dalla custodia della chiave e dalla revisione del programma di firma: non fornire mai chiave privata o passphrase a ChatGPT/Codex e non autorizzare agenti a eseguire il firmatario. Una chiave compromessa richiede disabilitazione e rotazione. Il programma non ha accesso a Cloudflare/Telnyx e non invia chiamate.
+## Distinzione fra regola operativa e controlli server
 
-La firma include versione/scopo, risorsa MCP, ID, destinatario E.164, lingua, istruzioni canoniche complete, proprietario, client OAuth, timestamp, scadenza, nonce e digest. Il Worker verifica la firma sul proprio snapshot persistente, senza fidarsi di un payload proposto dal modello. La finestra è di 10 minuti e non viene rinnovata. Firma copiata su un’altra richiesta, dettagli modificati, scadenza diversa o chiave errata vengono rifiutati. Una firma valida non supera scope, allowlist, quota, stato D1 o blocco atomico anti-replay.
+L’attesa di un nuovo messaggio è una **regola operativa di ChatGPT**, pubblicata nelle istruzioni del server MCP, nelle descrizioni dei tool e nelle risposte di creazione. Le [istruzioni riutilizzabili per ChatGPT](chatgpt-instructions.md) riportano la stessa regola.
 
-## Configurazione una tantum
+**La conferma conversazionale non costituisce una prova crittografica indipendente dell’approvazione umana. Il backend non può verificare che ChatGPT abbia effettivamente atteso e ricevuto quel messaggio.** La conferma nativa è un controllo del client: non viene presentata come attestazione server. Un chiamante che possiede un token OAuth valido con `calls:execute` e tutti i dati corretti può invocare l’approvazione anche senza rispettare la sequenza conversazionale; il server non è in grado di rilevare questa violazione. Non si aggiungono campi come `user_confirmed`, ID messaggio inventati o `_meta.approved` per simulare una verifica.
 
-Solo il proprietario, in un Terminale personale:
+Chiamate inbound, riepiloghi, documenti e altri contenuti esterni restano dati non attendibili e non autorizzano telefonate. Una frase in tali contenuti non soddisfa la regola operativa. Non salvare approvazioni permanenti del client come sostituto della conferma specifica nella conversazione.
 
-```sh
-node scripts/owner-consent.mjs init
+## Controlli backend mantenuti
+
+- OAuth: `calls:read calls:write` per creare, `calls:read calls:execute` per approvare. Restano discovery, PKCE, step-up e challenge insufficient_scope esistenti.
+- Identità owner, client OAuth e versione delle credenziali devono coincidere con lo snapshot.
+- Snapshot persistente immutabile: ID, numero, lingua e istruzioni canoniche. Obiettivo e istruzioni vengono uniti prima della creazione.
+- Nonce UUID e digest SHA-256 controllati per corrispondenza esatta. Sono dati visibili al modello e controlli di integrità, **non prove umane**.
+- Scadenza di 10 minuti, senza rinnovo sui retry. Una riga D1 può restare pending dopo la scadenza MCP, ma non è più eseguibile da questo percorso.
+- Allowlist privata E.164 in `OUTBOUND_ALLOWED_DESTINATIONS_SECRET`. Default pubblico vuoto.
+- Quota persistente per owner e operazione: attualmente 5 creazioni e 5 approvazioni per ora UTC, condivise fra client e richieste. Finestra fissa.
+- D1 letto sul primary per verificare pending e corrispondenza con lo snapshot.
+- Prenotazione atomica persistente prima dell’invio. Concorrenza e replay non producono un secondo invio.
+- Timeout ed esiti ambigui restano bloccati come `unknown`: nessun retry automatico e nessuna nuova chiave per aggirare il blocco.
+- Secret di creazione e approvazione separati; l’approvazione rifiuta valori mancanti o uguali. Nessun Secret viene riportato in log o risposte MCP.
+- Audit con timestamp e codici, senza attribuirgli una falsa attestazione del messaggio umano.
+
+## Configurazione e deployment
+
+Solo MCP cambia per questo rilascio:
+
+```text
+OUTBOUND_ENABLED=true
+OUTBOUND_CONTRACT_VERIFIED=true
+OUTBOUND_EXECUTION_ENABLED=true
+OUTBOUND_CONFIRMATION_POLICY=conversation-policy-v1
+OUTBOUND_RATE_LIMIT_PER_HOUR=5
 ```
 
-Usare una passphrase casuale di almeno 20 caratteri conservata nel password manager. La chiave privata cifrata è salvata con permessi 0600 in `~/.config/personal-phone-assistant/owner-signing-key.pem`. L’inizializzazione rifiuta di sovrascrivere una chiave esistente. Salvare una copia cifrata in luogo sicuro. Il file `owner-consent-public.txt` contiene la sola chiave pubblica: è l’unico file che può essere letto per configurare il Worker.
-
-Su **MCP**, conservando tutti i Secret esistenti:
-
-- `OUTBOUND_CONSENT_PUBLIC_KEY`: chiave pubblica raw Ed25519, base64url senza padding (43 caratteri).
-- `OUTBOUND_APPROVAL_SECRET`: valore originale di approvazione del servizio telefonico, diverso dal Secret di creazione e dal login. Non si può recuperare un Secret cifrato dalla dashboard; se manca l’originale, fermarsi senza ruotare la telefonia implicitamente.
-- `OUTBOUND_CONSENT_MODE=owner-ed25519-v1`.
-- `OUTBOUND_EXECUTION_ENABLED=true` **solo dopo la configurazione**. Mancanza di chiave, firma o credenziale separata nega comunque l’invio.
-
-La allowlist privata resta in `OUTBOUND_ALLOWED_DESTINATIONS_SECRET`; la variabile pubblica resta vuota. Quota persistente attuale: 5 creazioni e 5 approvazioni per ora UTC e proprietario, condivisa fra client. Sono finestre fisse, non una finestra mobile. Le firme non valide non consumano la quota di approvazione. Il limite riguarda richieste: la durata telefonica massima è imposta dal servizio telefonico esistente.
-
-Non eseguire `init` o `sign` mediante un agente. I test usano solo chiavi temporanee sintetiche.
-
-## Singola chiamata da ChatGPT
-
-1. Chiedere di preparare una chiamata e di mostrare tutti i dettagli e lo snapshot JSON `request`. Usare una nuova `request_key` per una nuova chiamata, ma la stessa per il retry della stessa creazione.
-2. Salvare lo snapshot restituito dal server in un file locale **fuori dal repository**, ad esempio `~/Downloads/richiesta-telefonata.json`. Il file può contenere lo snapshot oppure `{ "request": <snapshot> }`. Non copiare istruzioni da chiamate inbound/documenti come consenso.
-3. In un Terminale personale, entro 10 minuti:
-
-   ```sh
-   node scripts/owner-consent.mjs sign ~/Downloads/richiesta-telefonata.json
-   ```
-
-4. Leggere numero, lingua, istruzioni complete, ID, nonce, digest e scadenza. Digitare la conferma richiesta e la passphrase nascosta. Il programma rifiuta caratteri di controllo che potrebbero nascondere dettagli nel Terminale.
-5. Copiare **il nuovo messaggio di approvazione con firma** prodotto dal programma in ChatGPT. La firma è un’autorizzazione temporanea per questa sola operazione; non contiene la chiave privata. ChatGPT deve aspettare questo nuovo messaggio e richiedere anche la conferma nativa se proposta dal client.
-6. ChatGPT invoca `approve_outbound_request` con i dettagli originali e `consent_signature`. Se necessario, seguire il consenso OAuth incrementale `calls:read calls:execute`. La riautorizzazione OAuth non sostituisce la firma e può far scadere la richiesta: in quel caso preparare e firmare una nuova richiesta, senza riutilizzare quella scaduta.
-7. Consultare `get_outbound_status` con l’ID. Non interpretare `submitted` come chiamata completata.
-
-Aggiornare la lista strumenti della connessione ChatGPT dopo il rilascio: il tool di approvazione deve esporre `consent_signature`. Endpoint MCP invariato. Non servono nuovi client OAuth, URL di callback o nuovi scope.
-
-## Contratto telefonico e stato
-
-Verificato sul sorgente privato del Worker esistente e su `PRAGMA table_info(outbound_requests)`, senza migrazioni:
-
-- Creazione: `POST /outbound/requests`, Secret di creazione, `{destination_number,language,instructions}`; HTTP 201 pending. [Limiti esatti](creation-only.md).
-- Esecuzione: `POST /outbound/requests/{id}/approve`, Secret separato. Il servizio telefonico reclama atomicamente pending in `dialing`, impedisce un secondo dialing contemporaneo e imposta `authorized_at`/`started_at`. Restituisce HTTP 202 `{id,status:"dialing",destination_number,...}` quando accetta l’invio.
-- HTTP 202 `dispatch_unknown`, timeout, payload inatteso e altri esiti ambigui rimangono `unknown`, con blocco persistente. Nessun retry automatico o nuova chiave per aggirarlo. L’eventuale errore terminale in D1 è comunque visibile.
-- Il callback esistente `/webhooks/outbound-status/{id}/{callback_token}` verifica il token casuale segreto e l’ID della chiamata. Registra risposta e durata; scrive `completed` oppure `failed` solo da `dialing`. Callback duplicati o tardivi non fanno regredire uno stato terminale. Questa route usa un token bearer casuale, non viene descritta come una verifica della firma Telnyx. I webhook inbound firmati restano invariati.
-- MCP legge sul primary `status,telnyx_call_id,answered_at,completed_at,duration_seconds,last_error`, senza esporre il token callback.
-
-| Stato MCP              | Fonte                                                                                        |
-| ---------------------- | -------------------------------------------------------------------------------------------- |
-| `pending_approval`     | Snapshot e riga pending, prima dell’esecuzione                                               |
-| `expired`              | Snapshot pending scaduto; la riga D1 può restare pending                                     |
-| `submitted`            | Invio accettato o dialing senza ID chiamata/risposta                                         |
-| `calling`              | D1 dialing con ID telefonico o `answered_at`; non implica che il destinatario abbia risposto |
-| `completed` / `failed` | Stato terminale D1 aggiornato dal servizio telefonico/callback                               |
-| `unknown`              | Esito ambiguo; vietato ritentare automaticamente                                             |
-
-`control_state` conserva la fase MCP; `phone_state` conserva lo stato grezzo telefonico. MCP non scrive in D1 e non aggiunge una seconda route webhook. Non sono stati modificati il Worker telefonico, inbound o Telnyx. Se i callback non arrivano, lo stato può restare submitted/calling: il progetto non inventa un esito terminale e non ripete la chiamata.
-
-## Verifica offline
-
-La suite standard verifica firma reale con chiave sintetica, alterazioni di tutti i dettagli firmati, chiavi errate, scadenza, scope/identità errati, concorrenza, replay, idempotenza, allowlist, quote, esiti ambigui e riconciliazione degli stati.
-
-Il contratto del sorgente telefonico esistente è verificabile senza pubblicarlo nel repository:
+Secret richiesti su MCP: `OUTBOUND_API_SECRET`, `OUTBOUND_APPROVAL_SECRET`, `OUTBOUND_ALLOWED_DESTINATIONS_SECRET`. I primi due devono contenere i rispettivi valori originali del Worker telefonico. La vecchia chiave pubblica di consenso non è più necessaria. Non modificare le credenziali telefoniche, Auth o Telnyx per aggiornare il flusso. Impostare `OUTBOUND_EXECUTION_ENABLED=false` per bloccare gli invii mantenendo la preparazione.
 
 ```sh
-node scripts/test-phone-contract.mjs /percorso/privato/worker.js
+npm run typecheck
+npm test
+npm run build
+npm run deploy:mcp
 ```
 
-Il programma usa D1 locale e sostituisce lessicalmente ogni `fetch` del sorgente con un trasporto locale che rifiuta la rete. Verifica creazione, approvazione, callback errati, risposta, completamento/fallimento e callback ripetuti/tardivi. Non esegue chiamate reali né scritture su Cloudflare.
+Build è un dry-run. Non servono bootstrap, deployment Auth, migrazioni D1 o modifiche inbound.
 
-Per il rilascio corrente distribuire soltanto MCP, conservando i Secret. `npm run build` resta un dry-run; nessun bootstrap o deployment Auth è necessario. Lasciare `OUTBOUND_EXECUTION_ENABLED=false` se la configurazione del proprietario non è completa. La richiesta pending storica non costituisce un’approvazione ed è scaduta: il primo collaudo reale richiede una nuova richiesta firmata.
+## Contratto telefonico e stati
 
-## Rapporto di rilascio — 25 ottobre 2026 (Asia/Tokyo)
+Contratto verificato sul sorgente esistente e sulle colonne D1:
 
-- MCP distribuito: `5ac36486-d6d2-4e71-a662-45e3e0a577b5`. Endpoint invariato.
-- Auth non distribuito: versione osservata `46bb7692-8e9b-49eb-90c1-0061bfdc690d`.
-- Worker telefonico non modificato/distribuito: versione osservata invariata `e21a07d0-b52a-4832-bb41-54b18f85a1ae`.
-- Binding verificati: `AUTH_SERVER` verso AuthServer, `PHONE_API` verso il servizio telefonico esistente, `DB` verso `f8604adb-ac12-4298-a9be-327727a20675`. Il servizio telefonico usa lo stesso database con il proprio binding `phone-assistant-db`.
-- Typecheck, 25 test del progetto e build dry-run superati; audit dipendenze di produzione: zero vulnerabilità. Verifica offline del sorgente telefonico: 24 controlli superati con rete bloccata.
-- Verifica live esclusivamente in lettura tramite la connessione MCP: richiesta storica ancora pending in D1, controllo MCP `expired`, nessuna autorizzazione o chiamata associata. Discovery PRM sul percorso della risorsa HTTP 200; invocazione MCP senza token HTTP 401 con challenge.
-- Stato di sicurezza al rilascio: `OUTBOUND_EXECUTION_ENABLED=false`. Chiave pubblica del proprietario e Secret di approvazione non ancora configurati su MCP. L’inizializzazione del firmatario richiede il proprietario, senza esporre la passphrase all’agente.
-- Nessun test di chiamata reale effettuato. Il primo invio reale e la consegna dei callback Telnyx in produzione restano da collaudare dopo configurazione e firma specifica del proprietario. La presenza dei Secret non prova da sola la corrispondenza del loro valore: non viene dichiarata una validazione live della credenziale di approvazione.
+- `POST /outbound/requests`, credenziale di creazione: `{destination_number,language,instructions}`, HTTP 201 pending. [Limiti del contratto](creation-only.md).
+- `POST /outbound/requests/{id}/approve`, credenziale separata: il servizio reclama atomicamente pending in `dialing`, imposta `authorized_at` e `started_at` e impedisce un secondo dialing contemporaneo.
+- MCP accetta come invio effettuato HTTP 202 con `{id,status:"dialing",destination_number,...}` corrispondente alla richiesta. Non equivale a una telefonata completata.
+- `dispatch_unknown`, timeout o risposte inattese mantengono il blocco persistente. Se D1 contiene un esito terminale, viene mostrato anche quando il precedente invio MCP era incerto.
+- Callback esistente `/webhooks/outbound-status/{id}/{callback_token}`: controlla token casuale segreto e ID telefonico, registra risposta e durata, aggiorna completed/failed solo da dialing. Callback ripetuti o tardivi non fanno regredire lo stato terminale. Si tratta di un token bearer, non di un’attestazione di consenso umano.
+- MCP non scrive in D1 e non aggiunge un secondo webhook. Legge solo colonne consentite; il token callback non viene esposto.
 
-### Attivazione su richiesta del proprietario
+| Stato MCP              | Significato                                                                          |
+| ---------------------- | ------------------------------------------------------------------------------------ |
+| `pending_approval`     | Preparata e ancora valida                                                            |
+| `expired`              | Scaduta per l’approvazione MCP                                                       |
+| `submitted`            | Invio accettato o dialing senza ID/risposta                                          |
+| `calling`              | Dialing con ID telefonico o risposta; non implica che il destinatario abbia risposto |
+| `completed` / `failed` | Esito terminale D1                                                                   |
+| `unknown`              | Esito ambiguo, vietato ritentare automaticamente                                     |
 
-Il proprietario ha inizializzato personalmente la chiave cifrata e confermato la pubblicazione del Secret separato di approvazione. È stata configurata esclusivamente la chiave pubblica; chiave privata e passphrase non sono state lette dall’agente. Su richiesta esplicita è stato attivato `OUTBOUND_EXECUTION_ENABLED=true` e distribuito soltanto MCP: versione `588395a1-b0f4-4cc5-a40b-a2bc2d0f0f1e`. Verificati sulla versione pubblicata il modo `owner-ed25519-v1` e i quattro binding Secret necessari. Typecheck, 25 test e build superati. Nessuna telefonata avviata: l’attivazione non è il consenso a una specifica chiamata. Il primo invio resta subordinato a una nuova richiesta e alla relativa firma valida. I valori dei Secret non sono stati letti né pubblicati; la credenziale di approvazione non è stata collaudata con un invio reale.
+`control_state` conserva la fase MCP; `phone_state` lo stato telefonico grezzo. Se i callback non arrivano, non viene inventato un completamento né ripetuta la chiamata.
+
+## Aggiornamento della connessione ChatGPT
+
+Aggiornare la lista strumenti dell’app MCP esistente: `approve_outbound_request` non deve più contenere `consent_signature` e la descrizione deve richiedere un nuovo messaggio esplicito. Endpoint invariato:
+
+`https://personal-phone-assistant-mcp.barsaglini-gianluca.workers.dev/mcp`
+
+Se ChatGPT usa ancora il vecchio schema, aggiornare/ricollegare l’app dalle impostazioni. Se viene richiesto lo step-up, autorizzare `calls:read calls:execute`; non è necessario creare una nuova app o un nuovo client OAuth. Le richieste scadute richiedono una nuova preparazione e una nuova conferma.
+
+## Verifica
+
+La suite usa solo telefonia simulata e verifica approvazione senza firma, OAuth incrementale, identità/scope errati, dettagli alterati, scadenza, allowlist, quote, idempotenza, concorrenza, replay, stato consultabile ed esiti ambigui. Controlla anche che i tool documentino l’attesa del nuovo messaggio e non espongano più il campo firma. I test non possono dimostrare che un modello seguirà sempre le istruzioni conversazionali.
+
+La verifica offline del contratto telefonico usa `node scripts/test-phone-contract.mjs /percorso/privato/worker.js`, con D1 locale e rete bloccata. Non avvia telefonate e non modifica la produzione.
+
+## Rapporto del rilascio — 25 ottobre 2026 (Asia/Tokyo)
+
+- Solo MCP distribuito, versione codice `867ee081-2ed8-4326-99ee-bb52986946e1`; versione attiva dopo rimozione della vecchia chiave pubblica `2fff0a21-601e-47c5-b768-4656df6f0968`.
+- Verificati `OUTBOUND_EXECUTION_ENABLED=true`, `OUTBOUND_CONFIRMATION_POLICY=conversation-policy-v1` e presenza dei tre Secret necessari. Nessun valore segreto è stato letto o pubblicato.
+- Auth invariato: `46bb7692-8e9b-49eb-90c1-0061bfdc690d`. Worker telefonico invariato: `e21a07d0-b52a-4832-bb41-54b18f85a1ae`.
+- Typecheck, 22 test automatici e build superati; audit di produzione con zero vulnerabilità rilevate. Rimossi i test specifici della firma ormai eliminata e mantenuti quelli sui controlli backend.
+- Consultazione live MCP in sola lettura riuscita: richiesta storica correttamente `expired` nel controllo MCP, nessun ID telefonico associato.
+- Nessuna telefonata reale avviata durante questo rilascio; nessuna modifica alle tabelle D1, a inbound o Telnyx. Non viene dichiarato un collaudo reale della credenziale di approvazione o dei callback di una nuova chiamata.

@@ -1,3 +1,5 @@
+> Le limitazioni di esecuzione descritte sotto sono storiche. Per il flusso corrente con conferma conversazionale vedere [outbound-execution.md](outbound-execution.md).
+
 # OAuth incrementale per ChatGPT
 
 **Aggiornamento operativo:** la fase corrente abilita soltanto la preparazione e blocca esplicitamente l’approvazione. Vedi [sola creazione](creation-only.md). Gli esiti operativi precedenti riportati sotto sono storici.

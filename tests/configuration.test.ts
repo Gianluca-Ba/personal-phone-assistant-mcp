@@ -47,13 +47,13 @@ it("configuration scripts accept JSONC, reject placeholders, and never target th
     expect(configured.name).toBe("personal-phone-assistant-mcp");
     expect(configured.d1_databases[0].database_id).toBe("b".repeat(32));
     configured.vars.OUTBOUND_EXECUTION_ENABLED = "true";
-    configured.vars.OUTBOUND_CONSENT_MODE = "model-confirmed";
+    configured.vars.OUTBOUND_CONFIRMATION_POLICY = "model-confirmed";
     writeFileSync(
       join(temp, "workers/mcp/wrangler.jsonc"),
       JSON.stringify(configured),
     );
     expect(run("preflight.mjs").status).toBe(1);
-    configured.vars.OUTBOUND_CONSENT_MODE = "owner-ed25519-v1";
+    configured.vars.OUTBOUND_CONFIRMATION_POLICY = "conversation-policy-v1";
     writeFileSync(
       join(temp, "workers/mcp/wrangler.jsonc"),
       JSON.stringify(configured),

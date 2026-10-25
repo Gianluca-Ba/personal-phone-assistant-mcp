@@ -22,7 +22,6 @@ export default {
       "approve",
       "status",
       "rateLimit",
-      "installTestReceipt",
       "expireTestRequest",
     ];
     if (!allowed.includes(input.method))

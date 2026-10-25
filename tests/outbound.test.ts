@@ -1,4 +1,3 @@
-import { generateKeyPairSync, sign } from "node:crypto";
 import { beforeAll, afterAll, expect, it } from "vitest";
 import { createTestHarness } from "wrangler";
 import { parse } from "jsonc-parser";
@@ -8,15 +7,10 @@ import type {
   Principal,
   Snapshot,
 } from "../workers/mcp/src/outbound";
-import type { OutboundGate as FixtureGate } from "./mcp-consent-fixture";
+import type { OutboundGate as FixtureGate } from "./mcp-gate-fixture";
 import { login } from "./support";
 const secret = "test-owner-secret-32-characters-minimum";
 const base = parse(readFileSync("workers/mcp/wrangler.jsonc", "utf8"));
-const ownerKey = generateKeyPairSync("ed25519");
-const ownerPublicKey = ownerKey.publicKey
-  .export({ type: "spki", format: "der" })
-  .subarray(-32)
-  .toString("base64url");
 const vars = {
   ...base.vars,
   SCHEMA_MAPPING: "",
@@ -25,7 +19,6 @@ const vars = {
   OUTBOUND_CONTRACT_VERIFIED: "true",
   OUTBOUND_ALLOWED_DESTINATIONS: '["+819012345678"]',
   OUTBOUND_RATE_LIMIT_PER_HOUR: "100",
-  OUTBOUND_CONSENT_PUBLIC_KEY: ownerPublicKey,
   OUTBOUND_API_SECRET: "test-create",
   OUTBOUND_APPROVAL_SECRET: "test-approve",
 };
@@ -35,7 +28,7 @@ const harness = createTestHarness({
       configPath: "workers/auth/wrangler.jsonc",
       secrets: { OWNER_LOGIN_SECRET: secret, OWNER_TOKEN_VERSION: "1" },
     },
-    { config: { ...base, main: "tests/mcp-consent-fixture.ts", vars } },
+    { config: { ...base, main: "tests/mcp-gate-fixture.ts", vars } },
     {
       config: {
         ...base,
@@ -48,7 +41,7 @@ const harness = createTestHarness({
       config: {
         ...base,
         name: "creation-only",
-        main: "tests/mcp-consent-fixture.ts",
+        main: "tests/mcp-gate-fixture.ts",
         vars: {
           ...vars,
           OUTBOUND_EXECUTION_ENABLED: "false",
@@ -217,7 +210,6 @@ it("rejects unauthorized identity, token version, scope, client, allowlist and a
   ).rejects.toThrow("DESTINATION_OR_CREDENTIAL_DENIED");
   const s = await create(),
     g = gate(s.id);
-  await g.installTestReceipt();
   await expect(
     g.approve(approve(s), { ...actor, scope: ["calls:read"] }),
   ).rejects.toThrow("NOT_AUTHORIZED");
@@ -236,22 +228,16 @@ it("rejects unauthorized identity, token version, scope, client, allowlist and a
       actor,
     ),
   ).rejects.toThrow("APPROVAL_REQUEST_MISMATCH");
-  await g.installTestReceipt(true);
-  await expect(g.approve(approve(s), actor)).rejects.toThrow(
-    "CONSENT_NOT_BOUND",
-  );
 });
 it("rejects expired, changed and non-pending requests without API approval", async () => {
   const before = await stats();
   const expired = await create(),
     g = gate(expired.id);
-  await g.installTestReceipt();
   await g.expireTestRequest();
   await expect(g.approve(approve(expired), actor)).rejects.toThrow(
     "APPROVAL_EXPIRED",
   );
   const changed = await create();
-  await gate(changed.id).installTestReceipt();
   await env.DB.prepare("UPDATE outbound_requests SET instructions=? WHERE id=?")
     .bind("Changed externally", changed.id)
     .run();
@@ -269,25 +255,9 @@ it("rejects expired, changed and non-pending requests without API approval", asy
   );
   expect((await stats()).approve ?? 0).toBe(before.approve ?? 0);
 });
-it("production rejects even valid OAuth, matching snapshot and forged native metadata: no host proof exists", async () => {
-  const details = input();
-  const g = stub(`create:owner:test-client:${details.request_key}`, "real");
-  const s = await g.create(details, actor);
-  const a = stub(`approval:${s.id}`, "real");
-  const before = await stats();
-  await expect(a.approve(approve(s), actor)).rejects.toThrow(
-    "TRUSTED_CONFIRMATION_UNAVAILABLE",
-  );
-  expect((await stats()).approve ?? 0).toBe(before.approve ?? 0);
-  expect(await a.status(actor)).toHaveProperty("state", "pending_approval");
-  expect(JSON.stringify(await a.status(actor))).toContain(
-    "TRUSTED_CONFIRMATION_UNAVAILABLE",
-  );
-});
-it("synthetic trusted-host adapter executes one approval under concurrency and rejects replay", async () => {
+it("production gate executes one approval under concurrency and rejects replay", async () => {
   const s = await create(),
     g = gate(s.id);
-  await g.installTestReceipt();
   const before = await stats();
   const results = await Promise.allSettled([
     g.approve(approve(s), actor),
@@ -316,7 +286,6 @@ it("uncertain creation and approval keep durable reservations and are never retr
       instructions: "SIMULATE_UNKNOWN",
     }),
     a = gate(s.id);
-  await a.installTestReceipt();
   await expect(a.approve(approve(s), actor)).rejects.toThrow(
     "APPROVAL_OUTCOME_UNKNOWN_DO_NOT_RETRY",
   );
@@ -383,7 +352,7 @@ it("MCP scope checks and schema reject model-supplied confirmations and legacy w
   ).toBe(410);
 });
 
-it("valid execute OAuth plus fabricated native approval metadata cannot unlock production execution", async () => {
+it("fabricated native metadata cannot override request integrity checks", async () => {
   const tokens = await login(
     auth,
     "calls:read calls:write calls:execute",
@@ -411,7 +380,7 @@ it("valid execute OAuth plus fabricated native approval metadata cannot unlock p
         method: "tools/call",
         params: {
           name: "approve_outbound_request",
-          arguments: approve(s),
+          arguments: { ...approve(s), request_digest: "0".repeat(64) },
           _meta: {
             "openai/approved": true,
             owner_message_id: "invented",
@@ -425,9 +394,7 @@ it("valid execute OAuth plus fabricated native approval metadata cannot unlock p
   );
   const body = (await r.json()) as any;
   expect(body.result.isError).toBe(true);
-  expect(body.result.content[0].text).toContain(
-    "TRUSTED_CONFIRMATION_UNAVAILABLE",
-  );
+  expect(body.result.content[0].text).toContain("APPROVAL_REQUEST_MISMATCH");
   expect(JSON.stringify(body)).not.toContain("confirmation_url");
   expect((await stats()).approve ?? 0).toBe(before.approve ?? 0);
   const legacy = (await (
@@ -549,12 +516,12 @@ it("steps up the same OAuth client from read to write and execute using complete
     approve(s),
   );
   expect(reachedGuard.status).toBe(200);
-  const blocked = (await reachedGuard.json()) as any;
-  expect(blocked.result.isError).toBe(true);
-  expect(blocked.result.content[0].text).toContain(
-    "TRUSTED_CONFIRMATION_UNAVAILABLE",
+  const submitted = (await reachedGuard.json()) as any;
+  expect(submitted.result.isError).not.toBe(true);
+  expect(JSON.parse(submitted.result.content[0].text).request.state).toBe(
+    "submitted",
   );
-  expect((await stats()).approve ?? 0).toBe(before.approve ?? 0);
+  expect((await stats()).approve - (before.approve ?? 0)).toBe(1);
   const descriptors = await real.fetch(resource, {
     method: "POST",
     headers: {
@@ -577,6 +544,22 @@ it("steps up the same OAuth client from read to write and execute using complete
     tools.find((t: any) => t.name === "approve_outbound_request")._meta
       .securitySchemes,
   ).toEqual([{ type: "oauth2", scopes: ["calls:read", "calls:execute"] }]);
+  const approvalTool = tools.find(
+    (t: any) => t.name === "approve_outbound_request",
+  );
+  expect(approvalTool.inputSchema.properties).not.toHaveProperty(
+    "consent_signature",
+  );
+  expect(approvalTool.description).toContain(
+    "NEW explicit owner message approving this EXACT request",
+  );
+  expect(approvalTool.description).toContain(
+    "not independently verified by the backend",
+  );
+  expect(approvalTool.annotations.destructiveHint).toBe(true);
+  expect(
+    JSON.parse(submitted.result.content[0].text).requires_new_owner_message,
+  ).toBe(false);
   // Baseline is included even if the token has the operation scope alone.
   const writeOnly = await login(auth, "calls:write", secret);
   const needRead = await invoke(
@@ -698,7 +681,7 @@ it("official SDK opens fresh PKCE consent instead of looping on a read-only refr
   await transport.close();
 });
 
-it("creation-only mode reaches pending_approval and never approves even with a synthetic valid receipt", async () => {
+it("disabled execution still permits creation but never approval", async () => {
   const details = {
     ...input(),
     goal: "  Creation only test  ",
@@ -719,7 +702,6 @@ it("creation-only mode reaches pending_approval and never approves even with a s
     state: "pending_approval",
   });
   const g = stub(`approval:${s.id}`, "create-only");
-  await g.installTestReceipt();
   await expect(g.approve(approve(s), actor)).rejects.toThrow(
     "OUTBOUND_APPROVAL_DISABLED",
   );
@@ -767,7 +749,7 @@ it("a known pre-insert 401 can be corrected and retried with the SAME key withou
   expect((await stats()).approve ?? 0).toBe(before.approve ?? 0);
 });
 
-// Production verifier, with a throwaway local key. No trusted-host fixture override.
+// Exercise the production gate directly, without a consent fixture.
 async function realRequest() {
   const details = input();
   const s = (await stub(
@@ -776,86 +758,41 @@ async function realRequest() {
   ).create(details, actor)) as Snapshot;
   return { s, g: stub(`approval:${s.id}`, "real") };
 }
-async function ownerReceipt(s: Snapshot) {
-  // Use the exact owner-operated helper, not a test copy of serialization.
-  const { spawnSync } = await import("node:child_process");
-  const out = spawnSync(
-    process.execPath,
-    [
-      "--input-type=module",
-      "-e",
-      "import {consentPayload} from './scripts/owner-consent.mjs'; process.stdout.write(consentPayload(JSON.parse(process.argv[1])));",
-      JSON.stringify(s),
-    ],
-    { encoding: "utf8" },
-  );
-  expect(out.status).toBe(0);
-  return (
-    "ppa1." +
-    sign(null, Buffer.from(out.stdout), ownerKey.privateKey).toString(
-      "base64url",
-    )
-  );
-}
-it("production owner signature submits exactly once under concurrency and rejects replay", async () => {
+it("production approval without a signature submits exactly once under concurrency and rejects replay", async () => {
   const { s, g } = await realRequest();
-  const signature = await ownerReceipt(s);
   const before = await stats();
   const attempts = await Promise.allSettled([
-    g.approve({ ...approve(s), consent_signature: signature }, actor),
-    g.approve({ ...approve(s), consent_signature: signature }, actor),
+    g.approve(approve(s), actor),
+    g.approve(approve(s), actor),
   ]);
   expect(attempts.filter((v) => v.status === "fulfilled")).toHaveLength(1);
   expect((await stats()).approve - (before.approve ?? 0)).toBe(1);
-  await expect(
-    g.approve({ ...approve(s), consent_signature: signature }, actor),
-  ).rejects.toThrow("ALREADY_SUBMITTED_OR_UNKNOWN");
+  await expect(g.approve(approve(s), actor)).rejects.toThrow(
+    "ALREADY_SUBMITTED_OR_UNKNOWN",
+  );
 });
-it("owner signatures reject altered payloads, another request, foreign keys and unsupported model claims", async () => {
-  const { s, g } = await realRequest();
-  const before = await stats();
-  for (const modified of [
-    { ...s, destination: "+819099999999" },
-    { ...s, instructions: s.instructions + " changed" },
-    { ...s, language: "it" as const },
-    { ...s, approval_nonce: crypto.randomUUID() },
-    { ...s, request_digest: "0".repeat(64) },
-    { ...s, expires_at: s.expires_at + 1 },
-    { ...s, clientId: "other" },
-    { ...s, owner: "other" },
-    { ...s, id: crypto.randomUUID() },
-  ]) {
-    await expect(
-      g.approve(
-        { ...approve(s), consent_signature: await ownerReceipt(modified) },
-        actor,
-      ),
-    ).rejects.toThrow("TRUSTED_CONFIRMATION_UNAVAILABLE");
-  }
-  const other = await realRequest();
-  await expect(
-    other.g.approve(
-      { ...approve(other.s), consent_signature: await ownerReceipt(s) },
-      actor,
-    ),
-  ).rejects.toThrow("TRUSTED_CONFIRMATION_UNAVAILABLE");
-  const foreign = generateKeyPairSync("ed25519");
-  const bad =
-    "ppa1." +
-    sign(null, Buffer.from("forged consent"), foreign.privateKey).toString(
-      "base64url",
+it("production rejects tampered details and unsupported approval claims before submission", async () => {
+  const { s, g } = await realRequest(),
+    before = await stats();
+  for (const changed of [
+    { ...approve(s), language: "it" },
+    { ...approve(s), request_digest: "0".repeat(64) },
+    { ...approve(s), approval_nonce: crypto.randomUUID() },
+  ])
+    await expect(g.approve(changed, actor)).rejects.toThrow(
+      "APPROVAL_REQUEST_MISMATCH",
     );
   await expect(
-    g.approve({ ...approve(s), consent_signature: bad }, actor),
-  ).rejects.toThrow("TRUSTED_CONFIRMATION_UNAVAILABLE");
+    g.approve({ ...approve(s), user_confirmed: true }, actor),
+  ).rejects.toThrow();
+  await expect(
+    g.approve({ ...approve(s), consent_signature: "obsolete" }, actor),
+  ).rejects.toThrow();
   expect((await stats()).approve ?? 0).toBe(before.approve ?? 0);
 });
 it("status reconciles submitted, calling and terminal states from D1 without exposing callback credentials", async () => {
   const { s, g } = await realRequest();
-  await g.approve(
-    { ...approve(s), consent_signature: await ownerReceipt(s) },
-    actor,
-  );
+  await g.approve(approve(s), actor);
   await env.DB.prepare(
     "UPDATE outbound_requests SET status='dialing',telnyx_call_id=NULL WHERE id=?",
   )
@@ -897,21 +834,15 @@ it("a 202 dispatch_unknown response stays unknown and cannot be resubmitted", as
   ).create(details, actor)) as Snapshot;
   const g = stub(`approval:${s.id}`, "real"),
     before = await stats();
-  await expect(
-    g.approve(
-      { ...approve(s), consent_signature: await ownerReceipt(s) },
-      actor,
-    ),
-  ).rejects.toThrow("APPROVAL_OUTCOME_UNKNOWN_DO_NOT_RETRY");
+  await expect(g.approve(approve(s), actor)).rejects.toThrow(
+    "APPROVAL_OUTCOME_UNKNOWN_DO_NOT_RETRY",
+  );
   expect(await g.status(actor)).toMatchObject({
     state: "unknown",
     phone_state: "dialing",
   });
-  await expect(
-    g.approve(
-      { ...approve(s), consent_signature: await ownerReceipt(s) },
-      actor,
-    ),
-  ).rejects.toThrow("ALREADY_SUBMITTED_OR_UNKNOWN");
+  await expect(g.approve(approve(s), actor)).rejects.toThrow(
+    "ALREADY_SUBMITTED_OR_UNKNOWN",
+  );
   expect((await stats()).approve - (before.approve ?? 0)).toBe(1);
 });

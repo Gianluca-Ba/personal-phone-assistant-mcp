@@ -1,4 +1,3 @@
-import { verifyOwnerSignature } from "./consent";
 import { DurableObject } from "cloudflare:workers";
 import { z } from "zod";
 const number = z.string().regex(/^\+[1-9]\d{7,14}$/);
@@ -46,10 +45,6 @@ export const approveInput = z
     instructions: z.string().min(1).max(10020),
     request_digest: z.string().regex(/^[a-f0-9]{64}$/),
     approval_nonce: z.string().uuid(),
-    consent_signature: z
-      .string()
-      .regex(/^ppa1\.[A-Za-z0-9_-]{86}$/)
-      .optional(),
   })
   .strict();
 export interface Principal {
@@ -65,8 +60,7 @@ export interface OutboundEnv {
   OWNER_TOKEN_VERSION: string;
   OUTBOUND_ENABLED?: string;
   OUTBOUND_EXECUTION_ENABLED?: string;
-  OUTBOUND_CONSENT_MODE?: string;
-  OUTBOUND_CONSENT_PUBLIC_KEY?: string;
+  OUTBOUND_CONFIRMATION_POLICY?: string;
   OUTBOUND_CONTRACT_VERIFIED?: string;
   OUTBOUND_API_SECRET?: string;
   OUTBOUND_APPROVAL_SECRET?: string;
@@ -74,10 +68,7 @@ export interface OutboundEnv {
   OUTBOUND_ALLOWED_DESTINATIONS_SECRET?: string;
   OUTBOUND_RATE_LIMIT_PER_HOUR?: string;
 }
-export type Snapshot = Omit<
-  z.infer<typeof approveInput>,
-  "consent_signature"
-> & {
+export type Snapshot = z.infer<typeof approveInput> & {
   owner: string;
   clientId: string;
   created_at: number;
@@ -85,15 +76,6 @@ export type Snapshot = Omit<
   state: string;
   attempted_at?: number;
 };
-// This is an INTERNAL adapter boundary, never an MCP argument or client-supplied _meta field.
-// No production adapter can currently attest ChatGPT's per-call human consent.
-export interface VerifiedConsent {
-  owner: string;
-  clientId: string;
-  request_digest: string;
-  approval_nonce: string;
-  expires_at: number;
-}
 const production =
   "https://personal-phone-assistant.barsaglini-gianluca.workers.dev";
 export const enabled = (env: OutboundEnv) =>
@@ -316,21 +298,17 @@ export class OutboundGate extends DurableObject<OutboundEnv> {
     if (!this.allowed(row!.destination)) fail("DESTINATION_NOT_ALLOWED");
     return row!;
   }
-  // Deliberately fail closed. OAuth, annotations, model arguments, a message id,
-  // an elicitation capability claim or _meta.approved are NOT consent receipts.
-  // Enabling real execution requires a separately reviewed, trusted host adapter.
-  protected async verifiedNativeConsent(
-    _snapshot: Snapshot,
-    _p: Principal,
-  ): Promise<VerifiedConsent | null> {
-    return null;
-  }
+  // Waiting for a new explicit owner message is a client operational rule.
+  // OAuth authorizes the caller; MCP carries no independently verifiable proof
+  // that this conversational rule was followed. Never treat _meta as evidence.
   async approve(raw: z.infer<typeof approveInput>, p: Principal) {
     const input = approveInput.parse(raw);
     this.authorize(p, "calls:execute");
     if (this.env.OUTBOUND_EXECUTION_ENABLED !== "true")
       fail("OUTBOUND_APPROVAL_DISABLED");
     this.configured();
+    if (this.env.OUTBOUND_CONFIRMATION_POLICY !== "conversation-policy-v1")
+      fail("INVALID_CONFIRMATION_POLICY");
     const snapshot = await this.ctx.storage.get<Snapshot>("snapshot");
     if (!snapshot) fail("REQUEST_NOT_BOUND");
     const s = snapshot!;
@@ -358,27 +336,6 @@ export class OutboundGate extends DurableObject<OutboundEnv> {
       row.instructions !== s.instructions
     )
       fail("REQUEST_CHANGED");
-    const consent =
-      (await this.verifiedNativeConsent(s, p)) ??
-      (this.env.OUTBOUND_CONSENT_MODE === "owner-ed25519-v1"
-        ? await verifyOwnerSignature(
-            s,
-            input.consent_signature,
-            this.env.OUTBOUND_CONSENT_PUBLIC_KEY,
-          )
-        : null);
-    if (!consent) {
-      await this.audit("TRUSTED_CONFIRMATION_UNAVAILABLE");
-      fail("TRUSTED_CONFIRMATION_UNAVAILABLE");
-    }
-    if (
-      consent!.owner !== s.owner ||
-      consent!.clientId !== s.clientId ||
-      consent!.request_digest !== s.request_digest ||
-      consent!.approval_nonce !== s.approval_nonce ||
-      consent!.expires_at <= Date.now()
-    )
-      fail("CONSENT_NOT_BOUND");
     if (
       !this.env.OUTBOUND_APPROVAL_SECRET ||
       this.env.OUTBOUND_APPROVAL_SECRET === this.env.OUTBOUND_API_SECRET

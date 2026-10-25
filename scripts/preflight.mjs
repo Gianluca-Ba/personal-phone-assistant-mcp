@@ -23,7 +23,7 @@ if (
   fail("Only the two integration Workers may be deployed.");
 if (auth.main !== "src/index.ts" || mcp.main !== "src/index.ts")
   fail(
-    "Only production entrypoints may be deployed; test consent adapters are prohibited.",
+    "Only production entrypoints may be deployed; test fixtures are prohibited.",
   );
 if (
   auth.kv_namespaces[0].id.includes("REPLACE") ||
@@ -37,9 +37,11 @@ if (auth.vars.OWNER_TOKEN_VERSION !== mcp.vars.OWNER_TOKEN_VERSION)
 if (
   !["false", "true"].includes(mcp.vars.OUTBOUND_EXECUTION_ENABLED) ||
   (mcp.vars.OUTBOUND_EXECUTION_ENABLED === "true" &&
-    mcp.vars.OUTBOUND_CONSENT_MODE !== "owner-ed25519-v1")
+    mcp.vars.OUTBOUND_CONFIRMATION_POLICY !== "conversation-policy-v1")
 )
-  fail("Execution requires the reviewed owner-ed25519-v1 consent verifier.");
+  fail(
+    "Execution requires the explicit conversation-policy-v1 operational policy.",
+  );
 if (
   mcp.vars.OUTBOUND_ENABLED === "true" &&
   (mcp.vars.OUTBOUND_CONTRACT_VERIFIED !== "true" ||

@@ -1,4 +1,4 @@
-> Documento storico della fase di sola creazione. Il flusso successivo con firma del proprietario è descritto in [outbound-execution.md](outbound-execution.md).
+> Documento storico della fase di sola creazione. Il flusso corrente con conferma nella conversazione è descritto in [outbound-execution.md](outbound-execution.md).
 
 # Primo intervento: preparare richieste senza effettuare telefonate
 
