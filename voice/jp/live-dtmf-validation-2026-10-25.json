@@ -1,0 +1,42 @@
+{
+  "date": "2026-10-25",
+  "timezone": "Asia/Tokyo",
+  "request_id": "8d24900d-9e53-4354-88f6-0bbc22dac74a",
+  "state": "completed",
+  "duration_seconds": 225,
+  "last_error": null,
+  "dtmf": {
+    "requested_digit": "5",
+    "assistant_tool_invocations": 1,
+    "tool_result_ok": true,
+    "provider_command_count": 1,
+    "provider_command_failed": false,
+    "provider_debug_digit_redacted": true,
+    "command_time_utc": "2026-10-25T08:15:55.400086Z",
+    "backend_result_time_utc": "2026-10-25T08:15:56.194686Z"
+  },
+  "streaming_started": true,
+  "conversation_linked_in_d1": true,
+  "termination": {
+    "hangup_cause": "normal_clearing",
+    "hangup_source": "callee",
+    "autonomous_hangup_command_observed": false,
+    "farewell_interrupted": true
+  },
+  "scope": "Japanese outbound only; unchanged inbound, OAuth and Telnyx configuration",
+  "production": {
+    "voice_worker_version": "aa20be16-dfae-4b39-9718-9431d726d606",
+    "phone_worker_version": "8badc6f7-330a-49f3-b1f8-917f99f21286"
+  },
+  "automated_tests": {
+    "unit": 100,
+    "workerd_checks": 11,
+    "legacy_phone_checks": 24,
+    "guarded_phone_checks": 29
+  },
+  "limits": [
+    "One successful destination/menu is not general carrier reliability proof.",
+    "Final call ended remotely after an interruption; autonomous post-interruption hangup was not verified.",
+    "Synthetic and live traces remain private."
+  ]
+}

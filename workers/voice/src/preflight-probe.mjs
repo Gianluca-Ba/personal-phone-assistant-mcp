@@ -1,7 +1,13 @@
 // Authenticated ops-only probe: actual production credentials/runtime, synthetic D1,
 // and an explicit egress allowlist that cannot issue a phone API command.
 import { VoiceBridge } from "./bridge.mjs";
-export async function probePreflight(env, storage, sourceId) {
+export async function probePreflight(
+  env,
+  storage,
+  sourceId,
+  audio = new Uint8Array(),
+) {
+  let silencePump;
   const data = new Map(),
     events = [];
   const row = {
@@ -74,9 +80,107 @@ export async function probePreflight(env, storage, sourceId) {
       destination: row.destination_number,
       from: env.OUTBOUND_FROM,
     });
+    const simulated = { dtmf: [], closed: false };
+    let playbackEnd = Date.now();
+    await bridge.attachMedia({
+      readyState: 1,
+      close() {},
+      send(raw) {
+        const frame = JSON.parse(raw);
+        if (frame.event === "media")
+          playbackEnd =
+            Math.max(playbackEnd, Date.now()) +
+            Buffer.from(frame.media.payload, "base64").length / 8;
+        if (frame.event === "mark")
+          setTimeout(
+            () => bridge.marks.acknowledge(frame.mark.name),
+            Math.max(0, playbackEnd - Date.now()),
+          );
+      },
+    });
+    clearInterval(bridge.inputPump);
+    bridge.controller.sendDigit = async (digit) => {
+      simulated.dtmf.push(digit);
+      return { ok: true };
+    };
+    bridge.controller.close = async () => {
+      simulated.closed = true;
+    };
+    bridge.controller.playFarewell = async () => {
+      setTimeout(
+        () => bridge.controller.event({ type: "system_farewell_completed" }),
+        250,
+      );
+    };
+    const onVoice = bridge.onVoice.bind(bridge);
+    bridge.onVoice = async (frame) => {
+      if (frame.type === "error")
+        events.push({
+          stage: "voice_error_response",
+          code: /^[a-zA-Z0-9_]{1,64}$/.test(frame.error?.code ?? "")
+            ? frame.error.code
+            : "unknown",
+        });
+      return onVoice(frame);
+    };
+    let offset = 0,
+      transcriptSeen = false;
+    bridge.stt?.addEventListener("message", (e) => {
+      try {
+        const raw =
+          typeof e.data === "string"
+            ? e.data
+            : new TextDecoder().decode(e.data);
+        const frame = JSON.parse(raw);
+        if (frame.transcript && !transcriptSeen) {
+          transcriptSeen = true;
+          events.push({ stage: "stt_speech_recognized" });
+        }
+        if (frame.errors)
+          events.push({
+            stage: "stt_error_response",
+            codes: frame.errors
+              .map((x) => String(x.code ?? "unknown"))
+              .filter((x) => /^[a-zA-Z0-9_]{1,50}$/.test(x)),
+          });
+      } catch {
+        events.push({ stage: "stt_unreadable_frame" });
+      }
+    });
+    silencePump = setInterval(() => {
+      if (bridge.stt?.readyState !== 1) return;
+      const frame = Buffer.alloc(160, 255);
+      if (audio.length)
+        for (let i = 0; i < 160; i++) frame[i] = audio[offset++ % audio.length];
+      bridge.stt.send(frame);
+    }, 20);
+    const connectionStart = Date.now();
+    for (const [name, socket] of [
+      ["voice", bridge.voice],
+      ["stt", bridge.stt],
+    ])
+      socket?.addEventListener("close", (e) =>
+        events.push({
+          stage: name + "_closed",
+          elapsed_ms: Date.now() - connectionStart,
+          code: e.code,
+          reason: /timeout|idle/i.test(e.reason ?? "")
+            ? "timeout"
+            : /abort/i.test(e.reason ?? "")
+              ? "abort"
+              : "other",
+        }),
+      );
+    await new Promise((resolve) => setTimeout(resolve, 30000));
     return {
-      status: r.status,
-      ready: !!bridge.voiceReady,
+      status: bridge.context?.failure ? 503 : r.status,
+      ready: !!bridge.voiceReady && !bridge.context?.failure,
+      connection_held_ms: 30000,
+      simulated_dtmf: simulated.dtmf,
+      simulated_closed: simulated.closed,
+      stt_final_received: bridge.controller.lastTranscript !== null,
+      menu_complete: !!bridge.controller.menu?.complete,
+      advertised_digits: bridge.controller.menu?.digits ?? [],
       stage: bridge.preflightStage ?? null,
       failure: bridge.context?.failure ?? null,
       events,
@@ -93,6 +197,7 @@ export async function probePreflight(env, storage, sourceId) {
       real_calls: 0,
     };
   } finally {
+    clearInterval(silencePump);
     bridge.ended = true;
     bridge.cleanup();
     if (storage) await storage.deleteAll();

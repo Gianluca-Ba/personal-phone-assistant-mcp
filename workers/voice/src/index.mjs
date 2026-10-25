@@ -205,6 +205,8 @@ export class VoiceSession {
           )
         )
           return reply({ error: "Unauthorized" }, 401);
+        if (Number(request.headers.get("Content-Length") ?? 0) > 131072)
+          return reply({ error: "Probe payload too large" }, 413);
         return reply(
           await probePreflight(
             this.env,
@@ -214,6 +216,7 @@ export class VoiceSession {
             )
               ? request.headers.get("X-Inspection-Request")
               : null,
+            new Uint8Array(await request.arrayBuffer()),
           ),
         );
       }
@@ -316,7 +319,10 @@ export class VoiceSession {
         }
       });
       server.addEventListener("error", () => {
-        void this.bridge.fail("media_error");
+        // A normal callee hangup can close media before its signed webhook arrives.
+        setTimeout(() => {
+          if (!this.bridge.ended) void this.bridge.disconnected();
+        }, 1000);
       });
       server.addEventListener("close", () => {
         setTimeout(() => {

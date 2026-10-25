@@ -2,6 +2,8 @@
 
 ## Production deployment
 
+**Current result:** a subsequent explicitly approved live trial completed and delivered one backend/provider DTMF command for digit 5. See [native transport, media/menu repair and live evidence](native-fetch-controller-diagnosis-2026-10-25.md). The earlier virtual-only status and measurements below are historical; autonomous closing after recipient interruption remains unverified.
+
 **Subsequent incident:** the first real attempt exposed an unsupported Cloudflare redirect mode during controller warmup. It was reproduced, corrected and tested in Cloudflare without dialing. See [incident and repair](voice-controller-unavailable-2026-10-25.md). The original virtual tests below did not establish production initialization.
 
 The dedicated Japanese outbound path is deployed. No real phone calls were made during development or validation. PSTN tone delivery, remote menu acceptance, real acoustic echo and real-world latency still require an explicitly approved pilot.

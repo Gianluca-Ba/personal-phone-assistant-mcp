@@ -59,6 +59,7 @@ function fixture(provider?: any) {
     status: "dialing",
     callback_token: callback,
     telnyx_call_id: null as string | null,
+    conversation_id: null as string | null,
     destination_number: "+819022222222",
     language: "ja",
     instructions:
@@ -80,6 +81,8 @@ function fixture(provider?: any) {
           run: async () => {
             if (sql.includes("SET telnyx_call_id"))
               row.telnyx_call_id = args[0];
+            if (sql.includes("SET conversation_id"))
+              row.conversation_id = args[0];
             return { success: true };
           },
         }),
@@ -265,6 +268,7 @@ it("never hangs up before the actual current-stream playback mark, and never dia
       },
     },
   });
+  expect(f.row.conversation_id).toBe("isolated-conversation");
   f.b.controller.event({ type: "input_audio_buffer.speech_stopped" });
   await f.b.onVoice({ type: "response.created", response: { id: "farewell" } });
   await f.b.onVoice({
@@ -611,4 +615,57 @@ it("returns only redacted registration metadata through authenticated diagnostic
   expect(JSON.stringify(b)).not.toMatch(
     /PRIVATE|819011|819022|instructions|callback_token|nonce/,
   );
+});
+it("accepts the actual Telnyx connected control frame before the authenticated stream start", async () => {
+  const f = fixture();
+  await f.register();
+  await f.b.attachMedia(new Socket());
+  await expect(
+    f.b.onMedia({ event: "connected", version: "1.0.0" }),
+  ).resolves.toBeUndefined();
+  expect(f.b.streamId).toBeUndefined();
+  expect(f.network).toEqual([]);
+  f.b.streamId = "already-started";
+  await expect(
+    f.b.onMedia({ event: "connected", version: "1.0.0" }),
+  ).rejects.toThrow("after start");
+});
+it("does not invalidate an IVR snapshot for raw music/noise, but rejects it after a recognized human turn", async () => {
+  const f = fixture();
+  await f.register();
+  f.env.EXTERNAL_STT = "true";
+  await f.b.attachMedia(new Socket());
+  await f.b.bindCall("bound-call");
+  f.b.controller.event({ type: "input_audio_buffer.speech_stopped" });
+  f.b.controller.event({
+    type: "conversation.item.input_audio_transcription.completed",
+    transcript: "その他のご質問は五を押してください。",
+  });
+  f.advance(800);
+  const m = await f.b.controller.command("read", "read_current_menu", {});
+  f.b.activity.observe(Buffer.alloc(160, 0));
+  expect(f.b.controller.menu.token).toBe(m.menu_token);
+  expect(f.b.controller.speaking).toBe(false);
+  f.b.turns.accept({
+    type: "TurnInfo",
+    request_id: "test",
+    turn_index: 1,
+    event: "StartOfTurn",
+    transcript: "はい",
+  });
+  const select = f.b.controller.command("select", "press_ivr_digit", {
+    digits: "5",
+    menu_token: m.menu_token,
+  });
+  f.b.turns.accept({
+    type: "TurnInfo",
+    request_id: "test",
+    turn_index: 1,
+    event: "EndOfTurn",
+    transcript: "はい、担当者です。ご用件は何でしょうか。",
+  });
+  f.advance(800);
+  await f.b.controller.tick();
+  expect((await select).reason).toBe("STALE_OR_INCOMPLETE_MENU");
+  expect(f.network.some((n) => n.url.endsWith("/send_dtmf"))).toBe(false);
 });

@@ -298,6 +298,7 @@ it("lets a failed clarification end as unable to proceed after a complete farewe
     type: "assistant_completed",
     text: "もう一度教えていただけますか？",
   });
+  h.menu("申し訳ありませんが、ご案内できません。失礼します。");
   expect(
     (
       await h.c.command("close", "finish_call_after_goodbye", {
@@ -314,4 +315,88 @@ it("lets a failed clarification end as unable to proceed after a complete farewe
   h.advance(1000);
   expect(await h.c.tick()).toBe(true);
   expect(h.closed).toEqual(["unable_to_proceed"]);
+});
+it("does not treat a choice-free IVR introduction as the end of the menu or task", async () => {
+  const h = harness();
+  h.menu("次の四つの中からご希望の番号を選択してください。");
+  expect(h.c.menuReady()).toBe(false);
+  expect(
+    (
+      await h.c.command("early-close", "finish_call_after_goodbye", {
+        outcome: "unable_to_proceed",
+      })
+    ).reason,
+  ).toBe("MENU_NOT_COMPLETE");
+  const read = h.c.command("waiting-read", "read_current_menu", {});
+  h.menu(
+    "営業時間は一を、サポートは二を、法人は三を、その他のご質問は五を押してください。",
+  );
+  await h.c.tick();
+  expect((await read).advertised_digits).toEqual(["1", "2", "3", "5"]);
+  expect(h.closed).toEqual([]);
+});
+it("queues a selection against the exact immutable menu through a replay introduction", async () => {
+  const h = harness();
+  h.menu("サポートは二を、その他のご質問は五を押してください。");
+  const snapshot = await h.c.command("read", "read_current_menu", {});
+  h.c.event({ type: "input_audio_buffer.speech_started" });
+  const select = h.c.command("select", "press_ivr_digit", {
+    digits: "5",
+    menu_token: snapshot.menu_token,
+  });
+  await h.c.tick();
+  expect(h.digits).toEqual([]);
+  h.c.event({ type: "input_audio_buffer.speech_stopped" });
+  h.c.event({
+    type: "conversation.item.input_audio_transcription.completed",
+    transcript: "次の四つの中からご希望の番号を選択してください。",
+  });
+  h.advance(800);
+  await h.c.tick();
+  expect((await select).ok).toBe(true);
+  expect(h.digits).toEqual(["5"]);
+  expect(h.c.menu.token).toBe(snapshot.menu_token);
+  await h.c.command("select", "press_ivr_digit", {
+    digits: "5",
+    menu_token: snapshot.menu_token,
+  });
+  expect(h.digits).toHaveLength(1);
+});
+it("never retargets a queued selection when a human or a different menu intervenes", async () => {
+  for (const text of [
+    "はい、担当者です。ご用件は何でしょうか。",
+    "予約は三を押してください。",
+  ]) {
+    const h = harness();
+    h.menu("その他のご質問は五を押してください。");
+    const m = await h.c.command("read", "read_current_menu", {});
+    h.c.event({ type: "input_audio_buffer.speech_started" });
+    const p = h.c.command("select", "press_ivr_digit", {
+      digits: "5",
+      menu_token: m.menu_token,
+    });
+    h.c.event({ type: "input_audio_buffer.speech_stopped" });
+    h.c.event({
+      type: "conversation.item.input_audio_transcription.completed",
+      transcript: text,
+    });
+    h.advance(800);
+    await h.c.tick();
+    expect((await p).reason).toBe("STALE_OR_INCOMPLETE_MENU");
+    expect(h.digits).toEqual([]);
+  }
+});
+it("expires an awaiting selection without sending a tone during continuous speech", async () => {
+  const h = harness();
+  h.menu("その他のご質問は五を押してください。");
+  const m = await h.c.command("read", "read_current_menu", {});
+  h.c.event({ type: "input_audio_buffer.speech_started" });
+  const p = h.c.command("select", "press_ivr_digit", {
+    digits: "5",
+    menu_token: m.menu_token,
+  });
+  h.advance(8100);
+  await h.c.tick();
+  expect((await p).reason).toBe("MENU_NOT_COMPLETE");
+  expect(h.digits).toEqual([]);
 });

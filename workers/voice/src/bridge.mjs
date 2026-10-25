@@ -1,3 +1,4 @@
+import { fetchSocketUpgrade } from "./upgrade.mjs";
 import { MediaActivity, SttTurns, genuineInterruption } from "./turns.mjs";
 import { isBackchannel } from "../../../scripts/jp-backchannel.mjs";
 import { CallController } from "../../../scripts/jp-call-controller.mjs";
@@ -287,6 +288,18 @@ export class VoiceBridge {
       },
     );
     if (!r.ok) throw Error("Conversation binding failed");
+    if (this.context.call_id)
+      await this.env.DB.prepare(
+        "UPDATE outbound_requests SET conversation_id = ? WHERE id = ? AND callback_token = ? AND telnyx_call_id = ? AND (conversation_id IS NULL OR conversation_id = ?)",
+      )
+        .bind(
+          this.context.conversation_id,
+          this.context.request_id,
+          this.context.callback_token,
+          this.context.call_id,
+          this.context.conversation_id,
+        )
+        .run();
     this.context.metadata_prebound = true;
     this.context.metadata_bound = !!this.context.call_id;
     await this.persist();
@@ -357,7 +370,8 @@ export class VoiceBridge {
       eot_threshold: "0.8",
       eot_timeout_ms: "2000",
     });
-    const r = await this.providerFetch(
+    const r = await fetchSocketUpgrade(
+      this.providerFetch,
       "https://api.telnyx.com/v2/speech-to-text/transcription?" + query,
       {
         headers: {
@@ -365,7 +379,6 @@ export class VoiceBridge {
           Authorization: "Bearer " + this.env.TELNYX_API_KEY,
         },
         redirect: "manual",
-        signal: AbortSignal.timeout(10000),
       },
     );
     if (r.status !== 101 || !r.webSocket)
@@ -477,7 +490,8 @@ export class VoiceBridge {
     this.voiceReadyPromise = new Promise((resolve) => {
       this.voiceReadyResolve = resolve;
     });
-    const r = await this.providerFetch(
+    const r = await fetchSocketUpgrade(
+      this.providerFetch,
       "https://api.telnyx.com/v2/ai/assistants/" +
         encodeURIComponent(this.env.OUTBOUND_ASSISTANT_ID) +
         "/conversation?input_sample_rate=8000&output_sample_rate=8000",
@@ -487,7 +501,6 @@ export class VoiceBridge {
           Authorization: "Bearer " + this.env.TELNYX_API_KEY,
         },
         redirect: "manual",
-        signal: AbortSignal.timeout(10000),
       },
     );
     if (r.status !== 101 || !r.webSocket) {
@@ -558,14 +571,15 @@ export class VoiceBridge {
     if (this.env.EXTERNAL_STT === "true") {
       this.activity = new MediaActivity({
         now: this.now,
-        onStart: () => this.beginTurn(),
+        // Energy detects possible barge-in, not a new semantic menu/turn.
+        onStart: () => {
+          this.controller.acousticGuardUntil = this.now() + 2000;
+        },
         onStop: () => {
-          this.controller.event({ type: "input_audio_buffer.speech_stopped" });
-          if (this.pendingTranscript) {
-            const text = this.pendingTranscript;
-            this.pendingTranscript = null;
-            this.deliverTranscript(text);
-          }
+          this.controller.acousticGuardUntil = Math.max(
+            this.controller.acousticGuardUntil,
+            this.now() + 320,
+          );
         },
       });
       this.turns = new SttTurns({
@@ -604,6 +618,11 @@ export class VoiceBridge {
   }
   async onMedia(frame) {
     if (this.ended) return;
+    // Telnyx sends connected before start, without a stream identity.
+    if (frame.event === "connected") {
+      if (this.streamId) throw Error("Unexpected connected frame after start");
+      return;
+    }
     if (frame.event === "start") {
       if (this.streamId) throw Error("Duplicate stream start");
       const state = parseState(frame.start?.client_state);
@@ -708,7 +727,7 @@ export class VoiceBridge {
         bytes: 0,
         rendered: 0,
         suppressed:
-          this.controller?.menu?.complete ||
+          this.controller?.menu?.isIvr ||
           /暗証|認証コード|パスワード|本人確認|PIN|OTP/i.test(
             this.controller?.inputText ?? "",
           ) ||
@@ -1003,7 +1022,7 @@ export class VoiceBridge {
       this.cleanup();
       return;
     }
-    this.context.failure = reason;
+    this.context.failure ??= reason;
     if (!this.context.call_id) {
       await this.persist();
       this.cleanup();

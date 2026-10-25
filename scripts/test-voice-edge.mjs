@@ -9,10 +9,17 @@ writeFileSync(
   join(dir, "edge.mjs"),
   `
 import {VoiceBridge} from ${JSON.stringify(resolve("workers/voice/src/bridge.mjs"))};
+import {fetchSocketUpgrade} from ${JSON.stringify(resolve("workers/voice/src/upgrade.mjs"))};
 class Memory{data=new Map();async get(k){return this.data.get(k)}async put(k,v){this.data.set(k,v)}}
 export default{async fetch(req){const mode=new URL(req.url).pathname;const calls=[],sockets=[];
 const row={id:crypto.randomUUID(),status:'dialing',callback_token:crypto.randomUUID(),destination_number:'+819022222222',language:'ja',instructions:'Offline test; never dial.'};
 const env={PREWARM_BEFORE_DIAL:'true',EXTERNAL_STT:'true',OUTBOUND_ASSISTANT_ID:'offline',OUTBOUND_ASSISTANT_VERSION:'version',TELNYX_API_KEY:'offline-only-key',VOICE_ORIGIN:'https://offline.invalid',VOICE_APP_ID:'123456',OUTBOUND_FROM:'+819011111111',DB:{prepare:()=>({bind:()=>({first:async()=>row})})}};
+if(mode==='/upgrade-deadline'){
+let signal;const pair=Object.values(new WebSocketPair());pair[1].accept();
+const upgraded=await fetchSocketUpgrade(async(_,init)=>{signal=init.signal;return new Response(null,{status:101,webSocket:pair[0]})},'https://offline.invalid',{},20);upgraded.webSocket.accept();
+await new Promise(r=>setTimeout(r,60));const armed=signal.aborted;pair[0].close();pair[1].close();
+let timedOut=false;try{await fetchSocketUpgrade((_,init)=>new Promise((resolve,reject)=>init.signal.addEventListener('abort',()=>reject(new DOMException('Timed out','AbortError')),{once:true})),'https://offline.invalid',{},20)}catch(e){timedOut=e.name==='AbortError'}
+return Response.json({socket_not_aborted:!armed,stalled_upgrade_aborted:timedOut});}
 if(mode==='/native-receiver'){const native=new VoiceBridge(new Memory(),env);try{await native.providerFetch('http://[invalid');return Response.json({rejected:false})}catch(e){return Response.json({rejected:true,illegal_invocation:/illegal invocation/i.test(e.message),invalid_url:/invalid.*url|url.*invalid|failed to parse url/i.test(e.message)})}}
 const b=new VoiceBridge(new Memory(),env,{providerFetch:async(url,options={})=>{
 // Constructing Request here exercises workerd validation, unlike a Node fetch mock.
@@ -50,6 +57,11 @@ try {
   assert.equal(native.rejected, true);
   assert.equal(native.illegal_invocation, false);
   assert.equal(native.invalid_url, true);
+  const deadline = await (
+    await worker.fetch("https://offline.invalid/upgrade-deadline")
+  ).json();
+  assert.equal(deadline.socket_not_aborted, true);
+  assert.equal(deadline.stalled_upgrade_aborted, true);
   const success = await (
     await worker.fetch("https://offline.invalid/success")
   ).json();
@@ -67,7 +79,7 @@ try {
   assert.equal(redirect.calls.length, 1);
   console.log(
     JSON.stringify({
-      checks: 9,
+      checks: 11,
       passed: true,
       runtime: "workerd",
       external_network: "never invoked",

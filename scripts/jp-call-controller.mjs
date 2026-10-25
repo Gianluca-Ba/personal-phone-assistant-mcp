@@ -40,6 +40,8 @@ export class CallController {
     this.operations = new Map();
     this.operationInputs = new Map();
     this.readWaiters = [];
+    this.selectionWaiters = [];
+    this.acousticGuardUntil = 0;
     this.inputText = "";
     this.lastTranscript = null;
     this.lastRawTranscript = "";
@@ -69,7 +71,6 @@ export class CallController {
       this.playbackAck = false;
       this.pending = null;
       this.farewell = null;
-      this.menu = null;
     }
     if (e.type === "input_audio_buffer.speech_stopped") {
       this.speaking = false;
@@ -92,6 +93,7 @@ export class CallController {
       else if (!this.inputText.endsWith(fragment)) this.inputText += fragment;
       this.lastTranscript = at;
       const text = this.inputText;
+      const previousMenu = this.menu;
       if (isBackchannel(text) && this.suspendedClosing) {
         this.pending = this.suspendedClosing.pending;
         this.farewell ??= this.suspendedClosing.farewell;
@@ -111,6 +113,8 @@ export class CallController {
         "",
       );
       this.menu = {
+        at,
+        isIvr: /押|選択|入力|メニュー|お選び|press|dial/i.test(text),
         text,
         token: this.token(),
         core: digest(core.replace(/[。、,.\s]/g, "")),
@@ -131,6 +135,20 @@ export class CallController {
           ),
         ],
       };
+      const genericReplayIntro =
+        /選択|メニュー|お選び|menu|select/i.test(fragment) &&
+        !/([0-9*#])(?:番)?(?:を|に|です|[、,]|\s)/.test(fragment);
+      if (
+        previousMenu?.complete &&
+        previousMenu.digits.length &&
+        !previousMenu.spent &&
+        at - previousMenu.at < 30000 &&
+        (genericReplayIntro || this.menu.core === previousMenu.core)
+      ) {
+        // The original completed choice snapshot stays immutable through a replay intro.
+        this.menu = previousMenu;
+        this.inputText = previousMenu.text;
+      }
     }
     if (e.type === "system_farewell_completed") {
       this.farewell = { at };
@@ -213,6 +231,26 @@ export class CallController {
     ) {
       const work = new Promise((resolve) =>
         this.readWaiters.push({ resolve, deadline: this.now() + 4000 }),
+      );
+      this.operations.set(id, work);
+      return work;
+    }
+    if (
+      name === "press_ivr_digit" &&
+      this.speaking &&
+      args &&
+      Object.keys(args).sort().join(",") === "digits,menu_token" &&
+      /^[0-9*#]$/.test(args.digits) &&
+      this.menu?.token === args.menu_token &&
+      !this.menu.spent
+    ) {
+      const work = new Promise((resolve) =>
+        this.selectionWaiters.push({
+          resolve,
+          args,
+          id,
+          deadline: this.now() + 8000,
+        }),
       );
       this.operations.set(id, work);
       return work;
@@ -307,6 +345,13 @@ export class CallController {
       if (this.speaking) return { ok: false, reason: "RECIPIENT_SPEAKING" };
       if (this.closingBlocked)
         return { ok: false, reason: "HOLD_OR_QUESTION_PENDING" };
+      if (
+        args.outcome === "unable_to_proceed" &&
+        this.menu?.isIvr &&
+        !this.menu.digits.length &&
+        !/暗証|認証|パスワード|PIN|OTP|payment|支払/i.test(this.menu.text)
+      )
+        return { ok: false, reason: "MENU_NOT_COMPLETE" };
       this.pending = { outcome: args.outcome, operationId };
       return {
         ok: true,
@@ -319,6 +364,9 @@ export class CallController {
     return (
       !this.speaking &&
       !!this.menu?.complete &&
+      (this.menu.digits.length > 0 ||
+        /暗証|認証|パスワード|PIN|OTP/i.test(this.menu.text)) &&
+      this.now() - this.menu.at < 30000 &&
       this.lastSpeechEnd !== null &&
       this.now() - this.lastSpeechEnd >= 750
     );
@@ -334,11 +382,26 @@ export class CallController {
         w.resolve({ ok: false, reason: "MENU_NOT_COMPLETE" });
       else this.readWaiters.push(w);
     }
+    const selections = this.selectionWaiters;
+    this.selectionWaiters = [];
+    for (const w of selections) {
+      if (this.closed || this.closing)
+        w.resolve({ ok: false, reason: "CLOSED" });
+      else if (this.menu?.token !== w.args.menu_token)
+        w.resolve({ ok: false, reason: "STALE_OR_INCOMPLETE_MENU" });
+      else if (this.menuReady())
+        w.resolve(await this.execute("press_ivr_digit", w.args, w.id));
+      else if (at >= w.deadline)
+        w.resolve({ ok: false, reason: "MENU_NOT_COMPLETE" });
+      else this.selectionWaiters.push(w);
+    }
     if (
       !this.pending ||
       this.closed ||
       this.closing ||
       this.speaking ||
+      this.selectionWaiters.length > 0 ||
+      at < this.acousticGuardUntil ||
       (this.requirePlaybackAck && !this.playbackAck) ||
       this.responseActive ||
       this.assistantQuestionPending ||
