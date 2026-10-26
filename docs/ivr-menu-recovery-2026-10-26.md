@@ -18,7 +18,7 @@ Deterministic tests reproduce the observed long-menu wording and timing. They re
 
 Provider transports in these regression tests are mocks. A real test is successful only when independent carrier events show an accepted command on the correct call leg and subsequent recipient speech confirms a menu transition/operator conversation. A tool invocation, a model summary and a normal phone-leg completion are not proof of those outcomes.
 
-Local validation passed: 218/218 tests, type checking, 24 legacy and 29 guarded phone-contract checks, 11 workerd checks, and all Worker dry-run builds. The contract fixture retains byte-identical protected inbound code and the same authorization guard.
+Local validation passed: 220/220 tests, type checking, 24 legacy and 29 guarded phone-contract checks, 11 workerd checks, and all Worker dry-run builds. The contract fixture retains byte-identical protected inbound code and the same authorization guard.
 
 ## Release and bounded real tests
 
@@ -37,3 +37,21 @@ A no-call, real-time replay of the test-five inbound recording on documented Dee
 Supported surfaces: [Telnyx streaming models](https://developers.telnyx.com/docs/voice/stt/websocket-streaming/parameters/engines-and-models), [language selection](https://developers.telnyx.com/docs/voice/stt/websocket-streaming/parameters/language), and [Flux-only end-of-turn parameters](https://developers.telnyx.com/docs/voice/stt/websocket-streaming/parameters/end-of-turn). Recording retranscriptions and a small replay establish compatibility, not general recognition accuracy or PSTN response latency. Whisper hallucinated generic viewing/channel-subscription text on hold audio; these candidates were not accepted as business facts.
 
 Test six used Nova-3 Japanese and dispatched the single digit during ordinary recipient quiet (27.5 s after answer, versus about 33 s in the preceding Flux trials). A routing transition was observed, but no useful answer arrived within the 90-second hold; the matching signed completion callback confirmed the farewell before closure. This is one timing observation, not a general latency benchmark. To avoid repeatedly abandoning a verified operator queue, routing holds now have a separate default ceiling of 180 seconds (`OUTBOUND_ROUTING_HOLD_MS`, permitted 10–180 seconds). Ordinary requested/checking holds remain limited to 90 seconds. Neither repeated announcements nor music renew either lease; the existing 300-second total carrier limit is unchanged.
+
+## Final real-call result
+
+The run stopped early after **7 of the 10 authorized calls**. Call seven reached an interactive recipient: the recipient requested repetition, answered the inventory question, and explained how to check again. A separate Japanese retranscription of the recorded inbound channel corroborates the business answer. Private call identities, complete transcripts and recordings remain ignored by git.
+
+| Test | Duration after answer | Carrier DTMF commands | Observed result                                                                  |
+| ---- | --------------------: | --------------------: | -------------------------------------------------------------------------------- |
+| 1    |                  55 s |                     0 | Native client-tool timeout                                                       |
+| 2    |                  55 s |                     0 | Correct token; continuous IVR replay blocked by speech guard                     |
+| 3    |                 108 s |                     1 | Transfer wording not yet recognized; transition watchdog                         |
+| 4    |                 144 s |                     1 | Transfer wait; remote hangup                                                     |
+| 5    |                  62 s |                     1 | Post-transfer question misrecognized; remote hangup                              |
+| 6    |                 126 s |                     1 | Verified routing; bounded hold expired; completed farewell then hangup           |
+| 7    |                 162 s |                     1 | Interactive informational conversation completed; completed farewell then hangup |
+
+There were no duplicate DTMF commands within a call. In call seven the signed closing playback completed at 03:11:10.278855 UTC, the hangup command followed at 03:11:11.590133 UTC, and the carrier hangup event followed at 03:11:12.232960 UTC. Completion of the informational task does not mean product availability or a purchase was confirmed.
+
+The transcript also exposed a bundled handoff: the recorded transfer announcement and the later live `もしもし` arrived in one final STT message. The final refinement honors cue order so that a later return releases the historical routing hold, while a later request to keep waiting still retains it. Regression fixtures replay the observed mixed message through both the detector and real bridge. This last small refinement was validated automatically; no further PSTN call was made after the successful seventh trial. General recognition accuracy and low PSTN latency are not certified by these few calls.

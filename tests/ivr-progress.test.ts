@@ -58,6 +58,22 @@ it("recognizes the observed post-transfer audibility question as a dialogue cand
       "human_greeting_candidate",
     );
 });
+it("uses the later live greeting in a mixed transfer/STT turn and preserves a genuinely renewed wait instruction", () => {
+  for (const text of [
+    "次の四つの中がお電話を転送しております。もしもし",
+    "お電話を転送しております。お待たせいたしました。担当のテストです。",
+  ])
+    expect(progressEvidence(baseline, text)).toMatchObject({
+      kind: "human_greeting_candidate",
+    });
+  for (const text of [
+    "もしもし。お電話を転送しております。",
+    "お電話を転送しております。もしもし。少々お待ちください。",
+  ])
+    expect(progressEvidence(baseline, text)).toMatchObject({
+      kind: "routing_announcement",
+    });
+});
 it("recognizes the observed ongoing transfer without confusing conditional or quoted menu labels", () => {
   for (const text of [
     "お電話を転送しております。",

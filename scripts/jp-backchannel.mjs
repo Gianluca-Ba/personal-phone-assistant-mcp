@@ -25,9 +25,25 @@ const verificationPause =
 export const isRoutingHold = (text) => {
   const value = normalizeJapaneseTurn(text);
   if (/[「」『』“”"?？]/.test(value)) return false;
-  return /(?:おつなぎ|お繋ぎ|転送)(?:いたしております|しております|しています|いたします|します)(?:[。、.!！\s]|ので|$)/.test(
-    value,
+  const declarations = [
+    ...value.matchAll(
+      /(?:おつなぎ|お繋ぎ|転送)(?:いたしております|しております|しています|いたします|します)(?:[。、.!！\s]|ので|$)/g,
+    ),
+  ];
+  const latest = declarations.at(-1);
+  if (!latest) return false;
+  // A final STT turn can contain the old recording followed by the live staff
+  // greeting. Honor cue order instead of keeping the historical hold forever.
+  const after = value.slice(latest.index + latest[0].length);
+  const returned = [...after.matchAll(new RegExp(holdReturn.source, "ig"))].at(
+    -1,
   );
+  if (returned) {
+    const remaining = after.slice(returned.index + returned[0].length);
+    if (!holdRequest.test(remaining) && !verificationPause.test(remaining))
+      return false;
+  }
+  return true;
 };
 export const isHoldRequest = (text) => {
   const value = normalizeJapaneseTurn(text);

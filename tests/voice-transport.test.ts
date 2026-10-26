@@ -1233,6 +1233,20 @@ it("releases the routing hold for the recorded Japanese question instead of rema
   await f.generate("operator-response", "もしもし。予約なしで購入できますか。");
   expect(f.media.frames.some((m: any) => m.event === "media")).toBe(true);
 });
+it("resumes at the first real greeting even when STT bundles it after the recorded transfer announcement", async () => {
+  const f = await dialogueFixture();
+  f.b.context.ivr_progress = {
+    state: "awaiting_transition",
+    command_id: "mixed-handoff",
+    baseline: "その他のご質問は五を押してください。",
+  };
+  f.b.observeRoutingInterim("お電話を転送しております。");
+  f.recipient("次の四つの中がお電話を転送しております。もしもし");
+  expect(f.b.controller.hold).toBeNull();
+  expect(f.b.context.ivr_progress.state).toBe("dialogue_candidate");
+  await f.generate("first-hello", "はい、もしもし。");
+  expect(f.media.frames.some((m: any) => m.event === "media")).toBe(true);
+});
 it("never treats a conditional menu label as a routing hold, and repeated transfer observations do not renew the lease", async () => {
   const f = await dialogueFixture();
   f.b.context.ivr_progress = {
