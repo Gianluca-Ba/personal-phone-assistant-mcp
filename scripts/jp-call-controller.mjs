@@ -21,9 +21,10 @@ const terminal = new Set([
   "wrong_number",
   "unable_to_proceed",
 ]);
-// The real Apple menu takes ~16 seconds after its introductory STT turn.
-// This bounds an observational read, not permission to send any digit.
-const menuReadWaitMs = 30000;
+// Telnyx ends a client-side tool after 5 seconds. Return a bounded pending
+// observation before that deadline; a long menu is observed across fresh reads.
+const menuReadWaitMs = 3500;
+const selectionWaitMs = 3500;
 const menuNotComplete = () => ({
   ok: false,
   reason: "MENU_NOT_COMPLETE",
@@ -439,7 +440,7 @@ export class CallController {
       args &&
       !Array.isArray(args) &&
       Object.keys(args).length === 0 &&
-      !this.menuReady()
+      !this.menuSnapshotReady()
     ) {
       const work = new Promise((resolve) =>
         this.readWaiters.push({
@@ -464,7 +465,7 @@ export class CallController {
           resolve,
           args,
           id,
-          deadline: this.now() + 8000,
+          deadline: this.now() + selectionWaitMs,
         }),
       );
       this.operations.set(id, work);
@@ -485,7 +486,7 @@ export class CallController {
     if (name === "read_current_menu") {
       if (Object.keys(args).length)
         return { ok: false, reason: "INVALID_ARGUMENTS" };
-      if (!this.menuReady()) return menuNotComplete();
+      if (!this.menuSnapshotReady()) return menuNotComplete();
       return {
         ok: true,
         menu: this.menu.text,
@@ -602,16 +603,21 @@ export class CallController {
     }
     return { ok: false, reason: "UNKNOWN_ACTION" };
   }
-  menuReady() {
+  menuSnapshotReady() {
     return (
-      !this.speaking &&
       !this.recipientTerminal &&
       !this.hold &&
       !this.holdExpired &&
       !!this.menu?.complete &&
       (this.menu.digits.length > 0 ||
         /暗証|認証|パスワード|PIN|OTP/i.test(this.menu.text)) &&
-      this.now() - this.menu.at < 30000 &&
+      this.now() - this.menu.at < 30000
+    );
+  }
+  menuReady() {
+    return (
+      this.menuSnapshotReady() &&
+      !this.speaking &&
       this.lastSpeechEnd !== null &&
       this.now() - this.lastSpeechEnd >= 750
     );
@@ -667,7 +673,7 @@ export class CallController {
     for (const w of waiting) {
       if (this.actionBlock("read_current_menu"))
         w.resolve(this.actionBlock("read_current_menu"));
-      else if (this.menuReady())
+      else if (this.menuSnapshotReady())
         w.resolve(await this.execute("read_current_menu", {}));
       else if (at >= w.deadline) w.resolve(menuNotComplete());
       else this.readWaiters.push(w);

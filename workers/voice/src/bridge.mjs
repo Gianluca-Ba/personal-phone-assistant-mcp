@@ -418,6 +418,9 @@ export class VoiceBridge {
             system_farewell_played: this.context.system_farewell_played
               ? "true"
               : "false",
+            ...(this.context.ivr_gate
+              ? { voice_ivr_gate: JSON.stringify(this.context.ivr_gate) }
+              : {}),
             transcript_source:
               this.env.EXTERNAL_STT === "true"
                 ? "external_stt_flux_multi"
@@ -1382,6 +1385,35 @@ export class VoiceBridge {
         frame.item.name,
         args,
       );
+      if (["read_current_menu", "press_ivr_digit"].includes(frame.item.name)) {
+        const c = this.controller;
+        this.context.ivr_gate = {
+          at: this.now(),
+          tool: frame.item.name,
+          ok: result.ok,
+          reason: result.reason ?? null,
+          snapshot_ready: c.menuSnapshotReady(),
+          action_ready: c.menuReady(),
+          speaking: c.speaking,
+          last_speech_gap_ms:
+            c.lastSpeechEnd === null ? null : this.now() - c.lastSpeechEnd,
+          menu_complete: !!c.menu?.complete,
+          advertised_digits: c.menu?.digits ?? [],
+          menu_age_ms: c.menu ? this.now() - c.menu.at : null,
+          spent: !!c.menu?.spent,
+          exact_token:
+            frame.item.name === "press_ivr_digit"
+              ? args?.menu_token === c.menu?.token
+              : null,
+        };
+        // Diagnostic metadata is best effort and never part of consent, action
+        // readiness or the tool response's provider deadline. No raw text/token.
+        this.background(
+          this.persist()
+            .then(() => this.bindConversation(true))
+            .catch(() => {}),
+        );
+      }
       if (frame.item.name === "finish_call_after_goodbye" && !result.ok)
         this.context.controlled_close_requested = false;
       if (

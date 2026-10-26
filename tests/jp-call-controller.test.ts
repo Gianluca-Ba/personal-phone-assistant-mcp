@@ -240,17 +240,19 @@ it("assembles segmented menu transcripts and waits for the complete menu before 
 it("waits through the real sixteen-second Apple announcement and never substitutes a placeholder token", async () => {
   const h = harness();
   h.menu("次の四つの中からご希望の番号を選択してください。");
-  let settled = false;
-  const pending = h.c
-    .command("apple-read", "read_current_menu", {})
-    .then((v: any) => {
-      settled = true;
-      return v;
+  for (let i = 0; i < 4; i++) {
+    const pending = h.c.command("apple-pending-" + i, "read_current_menu", {});
+    h.advance(3500);
+    await h.c.tick();
+    expect(await pending).toMatchObject({
+      ok: false,
+      next_action: "read_current_menu",
+      action_not_executed: true,
     });
-  h.advance(4500);
-  await h.c.tick();
-  expect(settled).toBe(false);
-  h.advance(11242);
+    expect(h.digits).toEqual([]);
+  }
+  const pending = h.c.command("apple-read", "read_current_menu", {});
+  h.advance(1742);
   h.menu(
     "営業時間や道順については一を Apple のテクニカルサポートセンター、 Apple ケアに転送するには二を法人のお客様は三を、その他のご質問は五を押してください。",
   );
@@ -287,7 +289,7 @@ it("bounds an incomplete menu read and returns explicit silent recovery without 
   const h = harness();
   h.menu("次の四つの中からご希望の番号を選択してください。");
   const pending = h.c.command("never-completed", "read_current_menu", {});
-  h.advance(30001);
+  h.advance(3501);
   await h.c.tick();
   const result = await pending;
   expect(result).toMatchObject({
@@ -315,6 +317,30 @@ it("defers a valid selection until post-transcript quiet without weakening its m
   await h.c.tick();
   expect((await pending).ok).toBe(true);
   expect(h.digits).toEqual(["5"]);
+});
+it("exposes a complete menu snapshot during replay without authorizing a digit over an unknown recipient turn", async () => {
+  const h = harness();
+  h.menu("その他のご質問は五を押してください。");
+  h.c.event({ type: "input_audio_buffer.speech_started" });
+  const snapshot = await h.c.command(
+    "read-during-replay",
+    "read_current_menu",
+    {},
+  );
+  expect(snapshot.ok).toBe(true);
+  expect(h.c.menuReady()).toBe(false);
+  const pending = h.c.command("queued-during-replay", "press_ivr_digit", {
+    digits: "5",
+    menu_token: snapshot.menu_token,
+  });
+  h.advance(3500);
+  await h.c.tick();
+  expect(await pending).toMatchObject({
+    ok: false,
+    reason: "MENU_NOT_COMPLETE",
+    action_not_executed: true,
+  });
+  expect(h.digits).toEqual([]);
 });
 it("keeps completed farewell evidence while draining a subsequent closing acknowledgement", async () => {
   const h = harness();

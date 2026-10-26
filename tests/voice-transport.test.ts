@@ -991,7 +991,7 @@ it("closes after a closed-store announcement without a keypad action or spoken r
   );
   expect(f.network.some((n: any) => n.url.endsWith("/hangup"))).toBe(false);
 });
-it("round-trips the exact Apple menu token after a long client-tool wait, then sends one accepted digit", async () => {
+it("observes a long Apple menu with bounded client tools, then round-trips its exact token once", async () => {
   const f = await dialogueFixture();
   f.recipient("次の四つの中からご希望の番号を選択してください。");
   const reading = f.b.onVoice({
@@ -1003,20 +1003,32 @@ it("round-trips the exact Apple menu token after a long client-tool wait, then s
       call_id: "apple-menu-read",
     },
   });
-  f.advance(4500);
+  f.advance(3500);
   await f.b.checkDialogue();
-  expect(
-    f.b.voice.frames.some((e: any) => e.item?.call_id === "apple-menu-read"),
-  ).toBe(false);
-  f.advance(11242);
+  await reading;
+  const pendingOutput = f.b.voice.frames.find(
+    (e: any) => e.item?.call_id === "apple-menu-read",
+  );
+  expect(JSON.parse(pendingOutput.item.output)).toMatchObject({
+    ok: false,
+    next_action: "read_current_menu",
+    action_not_executed: true,
+  });
+  f.advance(12242);
   f.recipient(
     "営業時間や道順については一を Apple のテクニカルサポートセンター、 Apple ケアに転送するには二を法人のお客様は三を、その他のご質問は五を押してください。",
   );
-  f.advance(800);
-  await f.b.checkDialogue();
-  await reading;
+  await f.b.onVoice({
+    type: "conversation.item.created",
+    item: {
+      type: "function_call",
+      name: "read_current_menu",
+      arguments: "{}",
+      call_id: "apple-complete-read",
+    },
+  });
   const output = f.b.voice.frames.find(
-    (e: any) => e.item?.call_id === "apple-menu-read",
+    (e: any) => e.item?.call_id === "apple-complete-read",
   );
   const snapshot = JSON.parse(output.item.output);
   expect(snapshot).toMatchObject({
@@ -1036,7 +1048,11 @@ it("round-trips the exact Apple menu token after a long client-tool wait, then s
       call_id: "apple-menu-select",
     },
   };
-  await f.b.onVoice(select);
+  const selecting = f.b.onVoice(select);
+  expect(f.network.some((n: any) => n.url.endsWith("/send_dtmf"))).toBe(false);
+  f.advance(800);
+  await f.b.checkDialogue();
+  await selecting;
   await f.b.onVoice(select);
   expect(
     f.network.filter((n: any) => n.url.endsWith("/send_dtmf")),
