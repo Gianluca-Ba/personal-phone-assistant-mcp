@@ -40,6 +40,26 @@ const replayText = (value) =>
     .replace(/[、。，,.!！\s]/g, "");
 const replayIntroduction = (value) =>
   normalize(value).match(/次の([2-9])(?:つ|個)(?:の中)?から/);
+function replayPrefix(menu, value, cursor) {
+  if (
+    !menu?.replayIntro ||
+    !menu.replayContent ||
+    /[「」『』“”"?？]|違|変更|ではなく|いいえ|もしもし|ご用件|担当者/.test(
+      value,
+    )
+  )
+    return null;
+  const observed = replayText(value);
+  if (!observed) return null;
+  const candidate = observed.startsWith(replayText(menu.replayIntro))
+    ? observed
+    : cursor?.token === menu.token
+      ? cursor.text + observed
+      : "";
+  return candidate && menu.replayContent.startsWith(candidate)
+    ? candidate
+    : null;
+}
 // Conservative signals from authenticated recipient transcripts. Quoted,
 // hypothetical and interrogative wording is not a terminal declaration.
 export function recipientTerminalSignal(value) {
@@ -238,16 +258,9 @@ export class CallController {
           text,
         )
       ) {
-        const observed = replayText(text);
-        const introAt = observed.indexOf(replayText(m.replayIntro));
-        const candidate = introAt < 0 ? "" : observed.slice(introAt);
-        const knownPrefix =
-          introAt === 0 ||
-          (introAt > 0 &&
-            replayText(m.text).startsWith(observed.slice(0, introAt)));
         // Match the same count, exact introduction and every observed option
         // against an already complete snapshot. Unknown speech never qualifies.
-        if (knownPrefix && candidate && m.replayContent.startsWith(candidate)) {
+        if (replayPrefix(m, text, this.replayCursor)) {
           this.menuReplayToken = m.token;
           this.menuReplayUntil = at + 1000;
         }
@@ -290,6 +303,21 @@ export class CallController {
         /[。.!?]|押してください$/.test(old);
       const fragment = cumulative ? raw.slice(old.length).trimStart() : raw;
       this.lastRawTranscript = raw;
+      const replay =
+        this.menuSnapshotReady() && !this.menu.spent
+          ? replayPrefix(this.menu, fragment, this.replayCursor)
+          : null;
+      if (replay) {
+        // Consecutive STT finals can split the same replay across turns. Keep
+        // a cursor only through its exact observed prefix; never renew menu.at.
+        this.replayCursor = { token: this.menu.token, text: replay };
+        this.menuAssembly = null;
+        this.inputText = this.menu.text;
+        this.lastTranscript = at;
+        this.suspendedClosing = null;
+        return;
+      }
+      this.replayCursor = null;
       const countMatch = fragment.match(/次の([2-9])(?:つ|個)/);
       const interruptedMenu =
         isHoldReturn(fragment) ||
@@ -695,6 +723,7 @@ export class CallController {
       // Reserve before awaiting any side effect: concurrent or uncertain requests
       // cannot execute the same selection again.
       m.spent = true;
+      this.replayCursor = null;
       this.menuAssembly = null;
       this.inputText = "";
       this.lastTranscript = null;
