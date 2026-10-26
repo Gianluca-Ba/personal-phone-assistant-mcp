@@ -11,6 +11,7 @@ import { SilenceWatchdog } from "./silence.mjs";
 import {
   isBackchannel,
   isHoldFiller,
+  isRoutingHold,
 } from "../../../scripts/jp-backchannel.mjs";
 import { CallController } from "../../../scripts/jp-call-controller.mjs";
 import { PlaybackMarks } from "../../../scripts/jp-playback-marks.mjs";
@@ -317,7 +318,7 @@ export class VoiceBridge {
   async observeIvrProgress(text) {
     const p = this.context.ivr_progress;
     const known = this.context.seen_recipient_digests ?? [];
-    if (p?.state === "awaiting_transition") {
+    if (p && (p.state === "awaiting_transition" || this.routingWait())) {
       const evidence = progressEvidence(p.baseline, text, known);
       if (evidence) {
         p.state =
@@ -346,6 +347,41 @@ export class VoiceBridge {
       digest,
     ].slice(-32);
     await this.persist();
+  }
+  routingWait() {
+    const p = this.context?.ivr_progress;
+    return !!(
+      p &&
+      (p.state === "routing_candidate" ||
+        (p.state === "transition_observed" &&
+          p.evidence?.kind === "routing_announcement"))
+    );
+  }
+  observeRoutingInterim(text) {
+    const p = this.context.ivr_progress;
+    if (
+      !p ||
+      !["awaiting_transition", "routing_candidate"].includes(p.state) ||
+      this.controller.recipientTerminal ||
+      this.controller.holdExpired ||
+      !isRoutingHold(text)
+    )
+      return;
+    const first = p.state !== "routing_candidate";
+    p.state = "routing_candidate";
+    p.routing_candidate_at ??= this.now();
+    this.controller.enterHold();
+    this.suppressCurrentResponse("routing_hold");
+    if (first)
+      this.background(
+        this.recordEvent("ivr_routing_candidate", p.command_id, {
+          evidence_digest: sha256(menuText(text)),
+          carrier_reception_proven: false,
+        })
+          .then(() => this.persist())
+          .then(() => this.bindConversation(true))
+          .catch(() => {}),
+      );
   }
   async checkIvrDeadline() {
     const p = this.context?.ivr_progress;
@@ -422,6 +458,17 @@ export class VoiceBridge {
               : "false",
             ...(this.context.ivr_gate
               ? { voice_ivr_gate: JSON.stringify(this.context.ivr_gate) }
+              : {}),
+            ...(this.context.ivr_progress
+              ? {
+                  voice_ivr_progress: JSON.stringify({
+                    state: this.context.ivr_progress.state,
+                    evidence_kind:
+                      this.context.ivr_progress.evidence?.kind ?? null,
+                    routing_candidate_at:
+                      this.context.ivr_progress.routing_candidate_at ?? null,
+                  }),
+                }
               : {}),
             transcript_source:
               this.env.EXTERNAL_STT === "true"
@@ -656,6 +703,8 @@ export class VoiceBridge {
   modelMustRemainSilent() {
     return !!(
       this.controller?.hold ||
+      this.context.ivr_progress?.state === "awaiting_transition" ||
+      this.routingWait() ||
       this.controller?.holdExpired ||
       this.controller?.recipientTerminal ||
       this.controller?.pending ||
@@ -832,7 +881,11 @@ export class VoiceBridge {
           !c.speaking &&
           !this.activity?.active &&
           this.now() >= c.acousticGuardUntil,
-        held: !!c.hold || !!c.menu?.isIvr,
+        held:
+          !!c.hold ||
+          !!c.menu?.isIvr ||
+          this.context.ivr_progress?.state === "awaiting_transition" ||
+          this.routingWait(),
         terminal:
           !!c.recipientTerminal ||
           !!c.pending ||
@@ -887,11 +940,17 @@ export class VoiceBridge {
   deliverTranscript(text) {
     if (this.ended || this.failing) return;
     const holdFiller = this.currentHoldFiller(text);
+    const p = this.context.ivr_progress;
+    const evidence = p ? progressEvidence(p.baseline, text) : null;
+    const preserveRoutingHold =
+      this.routingWait() &&
+      !["human_greeting_candidate", "changed_menu"].includes(evidence?.kind);
     if (this.controller.speaking)
       this.controller.event({ type: "input_audio_buffer.speech_stopped" });
     this.controller.event({
       type: "conversation.item.input_audio_transcription.completed",
       transcript: text,
+      preserve_hold: preserveRoutingHold,
     });
     const turn = classifyRecipientTurn(text, { overlapped: this.overlapped });
     const listening = turn.kind === "backchannel" || holdFiller;
@@ -1052,6 +1111,7 @@ export class VoiceBridge {
       this.turns = new SttTurns({
         onStart: () => this.beginTurn(),
         onInterim: (text) => {
+          this.observeRoutingInterim(text);
           this.controller.event({
             type: "recipient_interim_transcript",
             transcript: text,

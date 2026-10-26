@@ -1130,6 +1130,77 @@ it("uses actual STT interim replay evidence to release one queued DTMF while kee
   expect(f.media.frames.some((m: any) => m.event === "media")).toBe(false);
   expect(f.b.context.ivr_progress.state).toBe("awaiting_transition");
 });
+it("keeps post-DTMF audio silent and a routing hold bounded through continuous music, then resumes for a real greeting", async () => {
+  const f = await dialogueFixture();
+  f.b.context.ivr_progress = {
+    state: "awaiting_transition",
+    command_id: "routing-test",
+    accepted_at: Date.now(),
+    deadline: Date.now() + 45000,
+    baseline: "その他のご質問は五を押してください。",
+  };
+  await f.generate("premature-question", "在庫はありますか。");
+  expect(f.media.frames.some((m: any) => m.event === "media")).toBe(false);
+  f.b.turns.accept({
+    type: "TurnInfo",
+    turn_index: 0,
+    event: "StartOfTurn",
+    transcript: "",
+  });
+  f.b.turns.accept({
+    type: "TurnInfo",
+    turn_index: 0,
+    event: "Update",
+    transcript: "お電話を転送しております。",
+  });
+  expect(f.b.context.ivr_progress.state).toBe("routing_candidate");
+  const lease = { ...f.b.controller.hold };
+  f.advance(46000);
+  await f.b.checkIvrDeadline();
+  expect(f.b.failing).not.toBe(true);
+  f.b.turns.accept({
+    type: "TurnInfo",
+    turn_index: 0,
+    event: "EndOfTurn",
+    transcript:
+      "お電話を転送しております。 हमारी यात्रा उसमें मतलब प्रकार से खेलते हैं.",
+  });
+  await Promise.resolve();
+  expect(f.b.context.ivr_progress.state).toBe("transition_observed");
+  expect(f.b.controller.hold.deadline).toBe(lease.deadline);
+  f.recipient("हमारी यात्रा उसमें मतलब प्रकार से खेलते हैं.");
+  expect(f.b.controller.hold.deadline).toBe(lease.deadline);
+  await f.generate("music-question", "次回の入荷日は分かりますか。");
+  expect(f.media.frames.some((m: any) => m.event === "media")).toBe(false);
+  f.recipient("お待たせいたしました。担当のテストです。ご用件をお伺いします。");
+  expect(f.b.controller.hold).toBeNull();
+  expect(f.b.context.ivr_progress.state).toBe("dialogue_candidate");
+  await f.generate("actual-question", "予約なしで購入できますか。");
+  expect(f.media.frames.some((m: any) => m.event === "media")).toBe(true);
+});
+it("never treats a conditional menu label as a routing hold, and repeated transfer observations do not renew the lease", async () => {
+  const f = await dialogueFixture();
+  f.b.context.ivr_progress = {
+    state: "awaiting_transition",
+    command_id: "routing-test",
+    accepted_at: Date.now(),
+    deadline: Date.now() + 45000,
+    baseline: "サポートへの転送は二を押してください。",
+  };
+  f.b.observeRoutingInterim("Appleケアに転送するには二を押してください。");
+  expect(f.b.context.ivr_progress.state).toBe("awaiting_transition");
+  expect(f.b.controller.hold).toBeNull();
+  f.b.observeRoutingInterim("担当者におつなぎしております。");
+  const lease = { ...f.b.controller.hold };
+  f.advance(80000);
+  f.b.observeRoutingInterim("お電話を転送しております。");
+  expect(f.b.controller.hold.deadline).toBe(lease.deadline);
+  f.advance(10001);
+  await f.b.checkDialogue();
+  expect(f.b.controller.holdExpired).toBe(true);
+  expect(f.b.controller.pending?.outcome).toBe("unable_to_proceed");
+  expect(f.b.context.ivr_progress.state).not.toBe("dialogue_candidate");
+});
 it("a text-only goodbye never bypasses the system-controlled farewell", async () => {
   const f = await dialogueFixture();
   f.recipient("ありがとうございました。失礼します。");

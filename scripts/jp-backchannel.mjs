@@ -22,11 +22,21 @@ const holdReturn =
 // Require the affirmative commitment at the end, never a question or a quote.
 const verificationPause =
   /確認(?:いたします|致します|します|(?:を)?して(?:まいります|参ります|きます)|(?:を)?させて(?:いただきます|頂きます)|を取って(?:まいります|参ります))[。.!！\s]*$/;
+export const isRoutingHold = (text) => {
+  const value = normalizeJapaneseTurn(text);
+  if (/[「」『』“”"?？]/.test(value)) return false;
+  return /(?:おつなぎ|お繋ぎ|転送)(?:いたしております|しております|しています|いたします|します)(?:[。、.!！\s]|ので|$)/.test(
+    value,
+  );
+};
 export const isHoldRequest = (text) => {
   const value = normalizeJapaneseTurn(text);
   const implicit =
     !/[「」『』“”"]/.test(value) && verificationPause.test(value);
-  return (holdRequest.test(value) || implicit) && !holdNegation.test(value);
+  return (
+    (holdRequest.test(value) || implicit || isRoutingHold(value)) &&
+    !holdNegation.test(value)
+  );
 };
 export const isHoldReturn = (text) =>
   holdReturn.test(normalizeJapaneseTurn(text));

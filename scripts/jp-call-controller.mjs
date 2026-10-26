@@ -293,6 +293,7 @@ export class CallController {
         else if (
           isHoldReturn(fragment) ||
           ((this.hold || this.holdExpired) &&
+            !e.preserve_hold &&
             !isBackchannel(fragment) &&
             !isHoldFiller(fragment) &&
             fragment.trim())

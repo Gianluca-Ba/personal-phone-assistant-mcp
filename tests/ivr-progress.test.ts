@@ -34,6 +34,35 @@ it("labels a possible human greeting as a candidate, never as proven human conta
     progressEvidence(baseline, "お待たせしました。担当のテストです。"),
   ).toMatchObject({ kind: "human_greeting_candidate" });
 });
+it("does not release a routing hold for an announcement that asks the caller to keep waiting", () => {
+  for (const text of [
+    "お待たせしました。少々お待ちください。",
+    "お待たせしております。",
+    "Thank you for holding. Please hold.",
+  ])
+    expect(progressEvidence(baseline, text)?.kind).not.toBe(
+      "human_greeting_candidate",
+    );
+});
+it("recognizes the observed ongoing transfer without confusing conditional or quoted menu labels", () => {
+  for (const text of [
+    "お電話を転送しております。",
+    "ただいま担当者におつなぎしております。",
+    "お電話を転送いたしますので少々お待ちください。",
+    "営業時間や道順お電話を転送しております。 हमारी यात्रा उसमें मतलब प्रकार से खेलते हैं.",
+  ])
+    expect(progressEvidence(baseline, text)).toMatchObject({
+      kind: "routing_announcement",
+    });
+  for (const text of [
+    "Appleケアに転送するには二を押してください。",
+    "転送しておりますか？",
+    "「お電話を転送しております」と案内されています。",
+  ])
+    expect(progressEvidence(baseline, text)?.kind).not.toBe(
+      "routing_announcement",
+    );
+});
 it("bounds supported DTMF duration and no-transition waiting without a transmission-method override", () => {
   expect(dtmfTuning({})).toEqual({ duration: 250, timeout: 45000 });
   expect(

@@ -1,4 +1,9 @@
 import { sha256 } from "./security.mjs";
+import {
+  isRoutingHold,
+  isHoldRequest,
+  isHoldFiller,
+} from "../../../scripts/jp-backchannel.mjs";
 export const menuText = (text) =>
   text
     .normalize("NFKC")
@@ -21,11 +26,7 @@ export function progressEvidence(baseline, transcript, seen = []) {
     return null;
   // A routing announcement is evidence of a new observable state, not proof of
   // carrier DTMF reception. Conditional menu labels such as 転送するには do not qualify.
-  if (
-    /おつなぎ(?:し|いた)|お繋ぎ(?:し|いた)|転送(?:し|いたし)ます|順番におつなぎ/i.test(
-      transcript,
-    )
-  )
+  if (isRoutingHold(transcript))
     return { kind: "routing_announcement", digest: sha256(text) };
   if (
     ivr.test(transcript) &&
@@ -63,7 +64,9 @@ export function progressEvidence(baseline, transcript, seen = []) {
     return { kind: "information_announcement", digest: sha256(text) };
   if (
     !ivr.test(transcript) &&
-    /お待たせ(?:いた)?しました|担当の.{1,12}(?:です|でございます)|ご用件(?:を|は)|どのような/.test(
+    !isHoldRequest(transcript) &&
+    !isHoldFiller(transcript) &&
+    /お待たせ(?:いた)?しました|担当の.{1,12}(?:です|でございます)|ご用件(?:を|は)|どのような|もしもし|お名前|確認(?:できました|が取れました)|(?:アップル|Apple)(?:ストア)?[、,\s]*川崎(?:店)?(?:の|[、,\s])[^。！？]{1,20}(?:です|でございます)|how (?:may|can) I help|thank you for (?:holding|waiting)/i.test(
       transcript,
     )
   )
