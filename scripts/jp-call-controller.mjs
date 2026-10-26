@@ -21,6 +21,17 @@ const terminal = new Set([
   "wrong_number",
   "unable_to_proceed",
 ]);
+// The real Apple menu takes ~16 seconds after its introductory STT turn.
+// This bounds an observational read, not permission to send any digit.
+const menuReadWaitMs = 30000;
+const menuNotComplete = () => ({
+  ok: false,
+  reason: "MENU_NOT_COMPLETE",
+  action_not_executed: true,
+  next_action: "read_current_menu",
+  instruction:
+    "Wait silently for the complete current menu and read it again. No menu token was issued. Never invent a token or send a digit before a successful read.",
+});
 // Conservative signals from authenticated recipient transcripts. Quoted,
 // hypothetical and interrogative wording is not a terminal declaration.
 export function recipientTerminalSignal(value) {
@@ -431,14 +442,17 @@ export class CallController {
       !this.menuReady()
     ) {
       const work = new Promise((resolve) =>
-        this.readWaiters.push({ resolve, deadline: this.now() + 4000 }),
+        this.readWaiters.push({
+          resolve,
+          deadline: this.now() + menuReadWaitMs,
+        }),
       );
       this.operations.set(id, work);
       return work;
     }
     if (
       name === "press_ivr_digit" &&
-      this.speaking &&
+      !this.menuReady() &&
       args &&
       Object.keys(args).sort().join(",") === "digits,menu_token" &&
       /^[0-9*#]$/.test(args.digits) &&
@@ -471,7 +485,7 @@ export class CallController {
     if (name === "read_current_menu") {
       if (Object.keys(args).length)
         return { ok: false, reason: "INVALID_ARGUMENTS" };
-      if (!this.menuReady()) return { ok: false, reason: "MENU_NOT_COMPLETE" };
+      if (!this.menuReady()) return menuNotComplete();
       return {
         ok: true,
         menu: this.menu.text,
@@ -491,6 +505,10 @@ export class CallController {
         return {
           ok: false,
           reason: "STALE_OR_INCOMPLETE_MENU",
+          action_not_executed: true,
+          next_action: "read_current_menu",
+          instruction:
+            "Read the current menu again and use only the exact menu_token returned by the server. A guessed, placeholder, expired or previous-menu token is never valid. No digit was sent.",
           ...(this.menuReady()
             ? {
                 current_menu: {
@@ -498,7 +516,6 @@ export class CallController {
                   menu_token: m.token,
                   advertised_digits: m.digits,
                 },
-                action_not_executed: true,
               }
             : {}),
         };
@@ -652,8 +669,7 @@ export class CallController {
         w.resolve(this.actionBlock("read_current_menu"));
       else if (this.menuReady())
         w.resolve(await this.execute("read_current_menu", {}));
-      else if (at >= w.deadline)
-        w.resolve({ ok: false, reason: "MENU_NOT_COMPLETE" });
+      else if (at >= w.deadline) w.resolve(menuNotComplete());
       else this.readWaiters.push(w);
     }
     const selections = this.selectionWaiters;
@@ -664,11 +680,15 @@ export class CallController {
       else if (this.actionBlock("press_ivr_digit"))
         w.resolve(this.actionBlock("press_ivr_digit"));
       else if (this.menu?.token !== w.args.menu_token)
-        w.resolve({ ok: false, reason: "STALE_OR_INCOMPLETE_MENU" });
+        w.resolve({
+          ok: false,
+          reason: "STALE_OR_INCOMPLETE_MENU",
+          action_not_executed: true,
+          next_action: "read_current_menu",
+        });
       else if (this.menuReady())
         w.resolve(await this.execute("press_ivr_digit", w.args, w.id));
-      else if (at >= w.deadline)
-        w.resolve({ ok: false, reason: "MENU_NOT_COMPLETE" });
+      else if (at >= w.deadline) w.resolve(menuNotComplete());
       else this.selectionWaiters.push(w);
     }
     if (

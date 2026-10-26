@@ -237,6 +237,85 @@ it("assembles segmented menu transcripts and waits for the complete menu before 
   expect(state.menu).toBe("予約変更は2を押してください。");
   expect(state.advertised_digits).toEqual(["2"]);
 });
+it("waits through the real sixteen-second Apple announcement and never substitutes a placeholder token", async () => {
+  const h = harness();
+  h.menu("次の四つの中からご希望の番号を選択してください。");
+  let settled = false;
+  const pending = h.c
+    .command("apple-read", "read_current_menu", {})
+    .then((v: any) => {
+      settled = true;
+      return v;
+    });
+  h.advance(4500);
+  await h.c.tick();
+  expect(settled).toBe(false);
+  h.advance(11242);
+  h.menu(
+    "営業時間や道順については一を Apple のテクニカルサポートセンター、 Apple ケアに転送するには二を法人のお客様は三を、その他のご質問は五を押してください。",
+  );
+  await h.c.tick();
+  const snapshot = await pending;
+  expect(snapshot.ok).toBe(true);
+  expect(snapshot.advertised_digits).toEqual(["1", "2", "3", "5"]);
+  const invalid = await h.c.command("placeholder", "press_ivr_digit", {
+    digits: "5",
+    menu_token: "MENU_TOKEN",
+  });
+  expect(invalid).toMatchObject({
+    reason: "STALE_OR_INCOMPLETE_MENU",
+    action_not_executed: true,
+    next_action: "read_current_menu",
+  });
+  expect(h.digits).toEqual([]);
+  const fresh = await h.c.command("apple-re-read", "read_current_menu", {});
+  expect(
+    (
+      await h.c.command("apple-select", "press_ivr_digit", {
+        digits: "5",
+        menu_token: fresh.menu_token,
+      })
+    ).ok,
+  ).toBe(true);
+  await h.c.command("apple-select", "press_ivr_digit", {
+    digits: "5",
+    menu_token: fresh.menu_token,
+  });
+  expect(h.digits).toEqual(["5"]);
+});
+it("bounds an incomplete menu read and returns explicit silent recovery without issuing a token", async () => {
+  const h = harness();
+  h.menu("次の四つの中からご希望の番号を選択してください。");
+  const pending = h.c.command("never-completed", "read_current_menu", {});
+  h.advance(30001);
+  await h.c.tick();
+  const result = await pending;
+  expect(result).toMatchObject({
+    ok: false,
+    reason: "MENU_NOT_COMPLETE",
+    action_not_executed: true,
+    next_action: "read_current_menu",
+  });
+  expect(result).not.toHaveProperty("menu_token");
+  expect(h.digits).toEqual([]);
+});
+it("defers a valid selection until post-transcript quiet without weakening its menu binding", async () => {
+  const h = harness();
+  h.menu("その他のご質問は五を押してください。");
+  const snapshot = await h.c.command("read-quiet", "read_current_menu", {});
+  h.c.event({ type: "input_audio_buffer.speech_stopped" });
+  const pending = h.c.command("select-quiet", "press_ivr_digit", {
+    digits: "5",
+    menu_token: snapshot.menu_token,
+  });
+  h.advance(749);
+  await h.c.tick();
+  expect(h.digits).toEqual([]);
+  h.advance(1);
+  await h.c.tick();
+  expect((await pending).ok).toBe(true);
+  expect(h.digits).toEqual(["5"]);
+});
 it("keeps completed farewell evidence while draining a subsequent closing acknowledgement", async () => {
   const h = harness();
   h.menu("予約を変更しました。失礼します。");

@@ -991,6 +991,64 @@ it("closes after a closed-store announcement without a keypad action or spoken r
   );
   expect(f.network.some((n: any) => n.url.endsWith("/hangup"))).toBe(false);
 });
+it("round-trips the exact Apple menu token after a long client-tool wait, then sends one accepted digit", async () => {
+  const f = await dialogueFixture();
+  f.recipient("次の四つの中からご希望の番号を選択してください。");
+  const reading = f.b.onVoice({
+    type: "conversation.item.created",
+    item: {
+      type: "function_call",
+      name: "read_current_menu",
+      arguments: "{}",
+      call_id: "apple-menu-read",
+    },
+  });
+  f.advance(4500);
+  await f.b.checkDialogue();
+  expect(
+    f.b.voice.frames.some((e: any) => e.item?.call_id === "apple-menu-read"),
+  ).toBe(false);
+  f.advance(11242);
+  f.recipient(
+    "営業時間や道順については一を Apple のテクニカルサポートセンター、 Apple ケアに転送するには二を法人のお客様は三を、その他のご質問は五を押してください。",
+  );
+  f.advance(800);
+  await f.b.checkDialogue();
+  await reading;
+  const output = f.b.voice.frames.find(
+    (e: any) => e.item?.call_id === "apple-menu-read",
+  );
+  const snapshot = JSON.parse(output.item.output);
+  expect(snapshot).toMatchObject({
+    ok: true,
+    advertised_digits: ["1", "2", "3", "5"],
+  });
+  expect(snapshot.menu_token).not.toBe("MENU_TOKEN");
+  const select = {
+    type: "conversation.item.created",
+    item: {
+      type: "function_call",
+      name: "press_ivr_digit",
+      arguments: JSON.stringify({
+        digits: "5",
+        menu_token: snapshot.menu_token,
+      }),
+      call_id: "apple-menu-select",
+    },
+  };
+  await f.b.onVoice(select);
+  await f.b.onVoice(select);
+  expect(
+    f.network.filter((n: any) => n.url.endsWith("/send_dtmf")),
+  ).toHaveLength(1);
+  expect(f.b.context.ivr_progress.state).toBe("awaiting_transition");
+  expect(
+    [...f.storage.data.values()].filter(
+      (v: any) => v?.event === "dtmf_accepted",
+    ),
+  ).toHaveLength(1);
+  expect(f.media.frames.some((e: any) => e.event === "media")).toBe(false);
+});
 it("a real question before farewell dispatch cancels pending closure and permits a reply", async () => {
   const f = await dialogueFixture();
   f.b.controller.event({ type: "input_audio_buffer.speech_stopped" });
