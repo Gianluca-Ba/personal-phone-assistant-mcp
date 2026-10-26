@@ -1085,6 +1085,51 @@ it("a real question before farewell dispatch cancels pending closure and permits
   expect(f.media.frames.some((m: any) => m.event === "media")).toBe(true);
   expect(f.network.some((n: any) => n.url.endsWith("/hangup"))).toBe(false);
 });
+it("uses actual STT interim replay evidence to release one queued DTMF while keeping model audio silent", async () => {
+  const f = await dialogueFixture();
+  const intro = "次の四つの中からご希望の番号を選択してください。";
+  f.recipient(
+    intro +
+      "営業時間は一を、サポートは二を、法人は三を、その他のご質問は五を押してください。",
+  );
+  const snapshot = await f.b.controller.command(
+    "read-known-replay",
+    "read_current_menu",
+    {},
+  );
+  f.b.turns.accept({
+    type: "TurnInfo",
+    turn_index: 0,
+    event: "StartOfTurn",
+    transcript: "",
+  });
+  const selecting = f.b.onVoice({
+    type: "conversation.item.created",
+    item: {
+      type: "function_call",
+      name: "press_ivr_digit",
+      arguments: JSON.stringify({
+        digits: "5",
+        menu_token: snapshot.menu_token,
+      }),
+      call_id: "select-known-replay",
+    },
+  });
+  expect(f.network.some((n: any) => n.url.endsWith("/send_dtmf"))).toBe(false);
+  f.b.turns.accept({
+    type: "TurnInfo",
+    turn_index: 0,
+    event: "Update",
+    transcript: intro,
+  });
+  await f.b.checkDialogue();
+  await selecting;
+  expect(
+    f.network.filter((n: any) => n.url.endsWith("/send_dtmf")),
+  ).toHaveLength(1);
+  expect(f.media.frames.some((m: any) => m.event === "media")).toBe(false);
+  expect(f.b.context.ivr_progress.state).toBe("awaiting_transition");
+});
 it("a text-only goodbye never bypasses the system-controlled farewell", async () => {
   const f = await dialogueFixture();
   f.recipient("ありがとうございました。失礼します。");

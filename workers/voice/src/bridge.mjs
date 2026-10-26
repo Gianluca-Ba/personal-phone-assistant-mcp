@@ -282,6 +282,7 @@ export class VoiceBridge {
       digit: digits,
       duration_millis: tuning.duration,
       call_leg_id: this.context.call_leg_id ?? null,
+      dispatch_guard: operation.dispatchGuard ?? "unspecified",
     });
     const result = await this.voiceAPI(
       "send_dtmf",
@@ -301,6 +302,7 @@ export class VoiceBridge {
           accepted_at: this.now(),
           deadline: this.now() + tuning.timeout,
           baseline,
+          dispatch_guard: operation.dispatchGuard ?? "unspecified",
         };
         await this.persist();
       }
@@ -1050,6 +1052,10 @@ export class VoiceBridge {
       this.turns = new SttTurns({
         onStart: () => this.beginTurn(),
         onInterim: (text) => {
+          this.controller.event({
+            type: "recipient_interim_transcript",
+            transcript: text,
+          });
           if (
             this.overlapped &&
             !this.currentHoldFiller(text) &&
@@ -1394,6 +1400,8 @@ export class VoiceBridge {
           reason: result.reason ?? null,
           snapshot_ready: c.menuSnapshotReady(),
           action_ready: c.menuReady(),
+          known_ivr_replay: c.knownMenuReplay(),
+          dispatch_guard: this.context.ivr_progress?.dispatch_guard ?? null,
           speaking: c.speaking,
           last_speech_gap_ms:
             c.lastSpeechEnd === null ? null : this.now() - c.lastSpeechEnd,

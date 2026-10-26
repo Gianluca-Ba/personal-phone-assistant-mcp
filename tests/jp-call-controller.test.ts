@@ -342,6 +342,116 @@ it("exposes a complete menu snapshot during replay without authorizing a digit o
   });
   expect(h.digits).toEqual([]);
 });
+const appleIntro = "次の四つの中からご希望の番号を選択してください。";
+const appleChoices =
+  "営業時間や道順については一を、サポートは二を、法人のお客様は三を、その他のご質問は五を押してください。";
+it("sends an exact-token selection during a recognized replay of the same complete menu, without closing or duplicating", async () => {
+  const h = harness();
+  h.menu(appleIntro + appleChoices);
+  const snapshot = await h.c.command("read-replay", "read_current_menu", {});
+  h.c.event({ type: "input_audio_buffer.speech_started" });
+  const queued = h.c.command("select-replay", "press_ivr_digit", {
+    digits: "5",
+    menu_token: snapshot.menu_token,
+  });
+  expect(h.digits).toEqual([]);
+  h.c.event({ type: "recipient_interim_transcript", transcript: appleIntro });
+  expect(h.c.speaking).toBe(true);
+  expect(h.c.knownMenuReplay()).toBe(true);
+  expect(
+    (
+      await h.c.command("unadvertised-replay", "press_ivr_digit", {
+        digits: "9",
+        menu_token: snapshot.menu_token,
+      })
+    ).reason,
+  ).toBe("DIGIT_NOT_ADVERTISED");
+  expect(
+    (
+      await h.c.command("invented-replay-token", "press_ivr_digit", {
+        digits: "5",
+        menu_token: "MENU_TOKEN",
+      })
+    ).reason,
+  ).toBe("STALE_OR_INCOMPLETE_MENU");
+  await h.c.tick();
+  expect((await queued).ok).toBe(true);
+  await h.c.command("select-replay", "press_ivr_digit", {
+    digits: "5",
+    menu_token: snapshot.menu_token,
+  });
+  expect(h.digits).toEqual(["5"]);
+  expect(h.closed).toEqual([]);
+});
+it("never treats unknown, quoted, changed or expired replay evidence as permission to send a digit", async () => {
+  for (const text of [
+    "もしもし、担当者です。",
+    "次の三つの中からご希望の番号を選択してください。",
+    "「" + appleIntro + "」と言っていました。",
+    "質問があります。" + appleIntro,
+    appleIntro + "購入は九を押してください。",
+  ]) {
+    const h = harness();
+    h.menu(appleIntro + appleChoices);
+    h.c.event({ type: "input_audio_buffer.speech_started" });
+    h.c.event({ type: "recipient_interim_transcript", transcript: text });
+    expect(h.c.knownMenuReplay(), text).toBe(false);
+    expect(h.c.menuReady(), text).toBe(false);
+    expect(h.digits).toEqual([]);
+  }
+  const h = harness();
+  h.menu(appleIntro + appleChoices);
+  h.c.event({ type: "input_audio_buffer.speech_started" });
+  h.c.event({ type: "recipient_interim_transcript", transcript: appleIntro });
+  expect(h.c.knownMenuReplay()).toBe(true);
+  h.advance(1000);
+  expect(h.c.knownMenuReplay()).toBe(false);
+  h.c.event({ type: "recipient_interim_transcript", transcript: appleIntro });
+  h.c.event({ type: "input_audio_buffer.speech_started" });
+  expect(h.c.knownMenuReplay()).toBe(false);
+  h.c.event({ type: "recipient_interim_transcript", transcript: appleIntro });
+  h.c.event({
+    type: "recipient_interim_transcript",
+    transcript: "いいえ、違います。",
+  });
+  expect(h.c.knownMenuReplay()).toBe(false);
+});
+it("retains the exact observed introduction across segmented choices and never activates replay before all advertised choices", async () => {
+  const h = harness();
+  h.menu(appleIntro);
+  h.c.event({ type: "input_audio_buffer.speech_started" });
+  h.c.event({ type: "recipient_interim_transcript", transcript: appleIntro });
+  expect(h.c.knownMenuReplay()).toBe(false);
+  h.menu(appleChoices);
+  h.c.event({ type: "input_audio_buffer.speech_started" });
+  h.c.event({ type: "recipient_interim_transcript", transcript: appleIntro });
+  expect(h.c.knownMenuReplay()).toBe(true);
+});
+it("revokes replay readiness before dispatch when a meaningful human interruption replaces the interim", async () => {
+  const h = harness();
+  h.menu(appleIntro + appleChoices);
+  const snapshot = await h.c.command(
+    "read-before-question",
+    "read_current_menu",
+    {},
+  );
+  h.c.event({ type: "input_audio_buffer.speech_started" });
+  const queued = h.c.command("select-before-question", "press_ivr_digit", {
+    digits: "5",
+    menu_token: snapshot.menu_token,
+  });
+  h.c.event({ type: "recipient_interim_transcript", transcript: appleIntro });
+  h.c.event({
+    type: "recipient_interim_transcript",
+    transcript: "もしもし、担当者です。質問があります。",
+  });
+  await h.c.tick();
+  expect(h.digits).toEqual([]);
+  h.advance(3500);
+  await h.c.tick();
+  expect((await queued).ok).toBe(false);
+  expect(h.digits).toEqual([]);
+});
 it("keeps completed farewell evidence while draining a subsequent closing acknowledgement", async () => {
   const h = harness();
   h.menu("予約を変更しました。失礼します。");

@@ -33,6 +33,14 @@ const menuNotComplete = () => ({
   instruction:
     "Wait silently for the complete current menu and read it again. No menu token was issued. Never invent a token or send a digit before a successful read.",
 });
+const replayText = (value) =>
+  normalize(String(value ?? ""))
+    .toLowerCase()
+    .replace(/[、。，,.!！\s]/g, "");
+const replayIntroduction = (value) =>
+  normalize(value).match(
+    /次の([2-9])(?:つ|個)(?:の中)?から(?:ご希望|希望)(?:の)?(?:番号|項目)を(?:選択してください|お選びください)/,
+  );
 // Conservative signals from authenticated recipient transcripts. Quoted,
 // hypothetical and interrogative wording is not a terminal declaration.
 export function recipientTerminalSignal(value) {
@@ -195,6 +203,8 @@ export class CallController {
       this.suspendedClosing = null;
     }
     if (e.type === "input_audio_buffer.speech_started") {
+      this.menuReplayToken = null;
+      this.menuReplayUntil = 0;
       this.speaking = true;
       this.suspendedClosing ??= {
         pending: this.pending,
@@ -205,11 +215,44 @@ export class CallController {
       this.pending = null;
       this.farewell = null;
     }
+    if (e.type === "recipient_interim_transcript") {
+      this.menuReplayToken = null;
+      this.menuReplayUntil = 0;
+      const text = String(e.transcript ?? "").normalize("NFKC");
+      const m = this.menu;
+      if (
+        this.speaking &&
+        this.menuSnapshotReady() &&
+        m?.isIvr &&
+        !m.spent &&
+        m.replayIntro &&
+        m.replayContent &&
+        !/[「」『』“”"?？]|違|変更|ではなく|いいえ|もしもし|ご用件|担当者/.test(
+          text,
+        )
+      ) {
+        const observed = replayText(text);
+        const introAt = observed.indexOf(replayText(m.replayIntro));
+        const candidate = introAt < 0 ? "" : observed.slice(introAt);
+        const knownPrefix =
+          introAt === 0 ||
+          (introAt > 0 &&
+            replayText(m.text).startsWith(observed.slice(0, introAt)));
+        // Match the same count, exact introduction and every observed option
+        // against an already complete snapshot. Unknown speech never qualifies.
+        if (knownPrefix && candidate && m.replayContent.startsWith(candidate)) {
+          this.menuReplayToken = m.token;
+          this.menuReplayUntil = at + 1000;
+        }
+      }
+    }
     if (e.type === "input_audio_buffer.speech_stopped") {
       this.speaking = false;
       this.lastSpeechEnd = at;
     }
     if (e.type === "conversation.item.input_audio_transcription.completed") {
+      this.menuReplayToken = null;
+      this.menuReplayUntil = 0;
       const raw = normalize(e.transcript ?? "");
       const old = this.lastRawTranscript;
       const cumulative =
@@ -297,6 +340,23 @@ export class CallController {
           ),
         ],
       };
+      const intro = replayIntroduction(text);
+      const previousIntro = previousMenu?.replayIntro;
+      const inherited =
+        !intro &&
+        previousIntro &&
+        previousMenu.digits.length === 0 &&
+        at - previousMenu.at < 30000;
+      const introduction = intro?.[0] ?? (inherited ? previousIntro : null);
+      const count = intro ? Number(intro[1]) : previousMenu?.replayCount;
+      if (introduction && this.menu.isIvr) {
+        this.menu.replayIntro = introduction;
+        this.menu.replayCount = count;
+        if (this.menu.complete && this.menu.digits.length === count) {
+          const body = intro ? text.slice(intro.index) : introduction + text;
+          this.menu.replayContent = replayText(body);
+        }
+      }
       const genericReplayIntro =
         /選択|メニュー|お選び|menu|select/i.test(fragment) &&
         !/([0-9*#])(?:番)?(?:を|に|です|[、,]|\s)/.test(fragment);
@@ -543,6 +603,9 @@ export class CallController {
       if (this.depth >= 5) return { ok: false, reason: "MENU_LIMIT" };
       if (count >= 2 || (count > 0 && !m.retry))
         return { ok: false, reason: "RETRY_LIMIT" };
+      const dispatchGuard = this.knownMenuReplay()
+        ? "matching_ivr_replay"
+        : "recipient_quiet";
       // Reserve before awaiting any side effect: concurrent or uncertain requests
       // cannot execute the same selection again.
       m.spent = true;
@@ -552,7 +615,10 @@ export class CallController {
       this.selections.set(key, count + 1);
       this.lastSelection = { key, digits: args.digits };
       try {
-        return await this.sendDigit(args.digits, { operationId });
+        return await this.sendDigit(args.digits, {
+          operationId,
+          dispatchGuard,
+        });
       } catch {
         return { ok: false, reason: "DELIVERY_UNCONFIRMED_DO_NOT_RETRY" };
       }
@@ -617,9 +683,18 @@ export class CallController {
   menuReady() {
     return (
       this.menuSnapshotReady() &&
-      !this.speaking &&
-      this.lastSpeechEnd !== null &&
-      this.now() - this.lastSpeechEnd >= 750
+      (this.knownMenuReplay() ||
+        (!this.speaking &&
+          this.lastSpeechEnd !== null &&
+          this.now() - this.lastSpeechEnd >= 750))
+    );
+  }
+  knownMenuReplay() {
+    return !!(
+      this.menuSnapshotReady() &&
+      !this.menu.spent &&
+      this.menuReplayToken === this.menu.token &&
+      this.now() < this.menuReplayUntil
     );
   }
   async tick() {
