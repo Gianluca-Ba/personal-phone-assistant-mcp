@@ -427,6 +427,36 @@ it("retains the exact observed introduction across segmented choices and never a
   h.c.event({ type: "recipient_interim_transcript", transcript: appleIntro });
   expect(h.c.knownMenuReplay()).toBe(true);
 });
+it("allows a separate bounded operator transfer wait while keeping ordinary requested holds at ninety seconds", async () => {
+  const h = harness();
+  h.menu("お電話を転送しております。");
+  const lease = { ...h.c.hold };
+  expect(lease.kind).toBe("routing");
+  expect(lease.deadline - lease.since).toBe(180000);
+  h.advance(90000);
+  await h.c.tick();
+  expect(h.c.holdExpired).toBe(false);
+  h.menu("担当者におつなぎしております。");
+  expect(h.c.hold.deadline).toBe(lease.deadline);
+  h.advance(90000);
+  await h.c.tick();
+  expect(h.c.holdExpired).toBe(true);
+  expect(h.c.pending?.outcome).toBe("unable_to_proceed");
+  const ordinary = harness();
+  ordinary.menu("在庫を確認いたします。");
+  expect(ordinary.c.hold.deadline - ordinary.c.hold.since).toBe(90000);
+  ordinary.advance(90000);
+  await ordinary.c.tick();
+  expect(ordinary.c.holdExpired).toBe(true);
+  expect(
+    () =>
+      new CallController({
+        sendDigit: async () => {},
+        close: async () => {},
+        maxRoutingHoldMs: 180001,
+      }),
+  ).toThrow("Invalid routing hold limit");
+});
 it("revokes replay readiness before dispatch when a meaningful human interruption replaces the interim", async () => {
   const h = harness();
   h.menu(appleIntro + appleChoices);

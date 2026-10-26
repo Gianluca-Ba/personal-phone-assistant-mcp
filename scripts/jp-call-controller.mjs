@@ -6,6 +6,7 @@ import {
   isHoldRequest,
   isHoldReturn,
   isHoldFiller,
+  isRoutingHold,
 } from "./jp-backchannel.mjs";
 import { PlaybackClock } from "./jp-playback-clock.mjs";
 const digest = (text) => createHash("sha256").update(text).digest("hex");
@@ -139,10 +140,18 @@ export class CallController {
     stripCumulativeHistory = true,
     playFarewell = null,
     maxHoldMs = 90000,
+    maxRoutingHoldMs = 180000,
   }) {
     if (!Number.isInteger(maxHoldMs) || maxHoldMs < 10000 || maxHoldMs > 90000)
       throw Error("Invalid hold limit");
     this.maxHoldMs = maxHoldMs;
+    if (
+      !Number.isInteger(maxRoutingHoldMs) ||
+      maxRoutingHoldMs < 10000 ||
+      maxRoutingHoldMs > 180000
+    )
+      throw Error("Invalid routing hold limit");
+    this.maxRoutingHoldMs = maxRoutingHoldMs;
     this.hold = null;
     this.holdExpired = false;
     this.holdExpiry = null;
@@ -289,7 +298,8 @@ export class CallController {
         this.assistantQuestionPending = false;
       }
       if (!this.recipientTerminal) {
-        if (isHoldRequest(fragment)) this.enterHold(at);
+        if (isHoldRequest(fragment))
+          this.enterHold(at, isRoutingHold(fragment) ? "routing" : "requested");
         else if (
           isHoldReturn(fragment) ||
           ((this.hold || this.holdExpired) &&
@@ -300,7 +310,7 @@ export class CallController {
         )
           this.leaveHold();
         else if (!this.hold && !this.holdExpired && isHoldRequest(text))
-          this.enterHold(at);
+          this.enterHold(at, isRoutingHold(text) ? "routing" : "requested");
       }
       this.recipientClosing =
         !!this.recipientTerminal ||
@@ -429,7 +439,7 @@ export class CallController {
       }
     }
   }
-  enterHold(at = this.now()) {
+  enterHold(at = this.now(), kind = "requested") {
     if (
       this.recipientTerminal ||
       this.closed ||
@@ -440,8 +450,9 @@ export class CallController {
     // Repeated hold announcements, music and aizuchi never refresh the lease.
     this.hold ??= {
       since: at,
-      deadline: at + this.maxHoldMs,
-      kind: "requested",
+      deadline:
+        at + (kind === "routing" ? this.maxRoutingHoldMs : this.maxHoldMs),
+      kind,
     };
     this.closingBlocked = true;
     this.pending = null;

@@ -1247,7 +1247,7 @@ it("never treats a conditional menu label as a routing hold, and repeated transf
   expect(f.b.controller.hold).toBeNull();
   f.b.observeRoutingInterim("担当者におつなぎしております。");
   const lease = { ...f.b.controller.hold };
-  f.advance(80000);
+  f.advance(170000);
   f.b.observeRoutingInterim("お電話を転送しております。");
   expect(f.b.controller.hold.deadline).toBe(lease.deadline);
   f.advance(10001);
@@ -1255,6 +1255,17 @@ it("never treats a conditional menu label as a routing hold, and repeated transf
   expect(f.b.controller.holdExpired).toBe(true);
   expect(f.b.controller.pending?.outcome).toBe("unable_to_proceed");
   expect(f.b.context.ivr_progress.state).not.toBe("dialogue_candidate");
+});
+it("validates the operator wait limit before creating any dial contract", async () => {
+  const f = fixture();
+  expect(f.b.routingHoldLimit()).toBe(180000);
+  for (const invalid of ["0", "180001", "NaN"]) {
+    f.env.OUTBOUND_ROUTING_HOLD_MS = invalid;
+    await expect(f.register()).rejects.toThrow(
+      "Unsupported routing hold limit",
+    );
+  }
+  expect(f.network).toEqual([]);
 });
 it("a text-only goodbye never bypasses the system-controlled farewell", async () => {
   const f = await dialogueFixture();

@@ -64,6 +64,7 @@ export class VoiceBridge {
     dtmfTuning(this.env); // Validate supported limits before returning any dial contract.
     this.speechLimit();
     this.recognitionModel();
+    this.routingHoldLimit();
     const existing = await this.load();
     const row = await this.env.DB.prepare(
       "SELECT * FROM outbound_requests WHERE id = ?",
@@ -371,7 +372,8 @@ export class VoiceBridge {
     const first = p.state !== "routing_candidate";
     p.state = "routing_candidate";
     p.routing_candidate_at ??= this.now();
-    this.controller.enterHold();
+    this.controller.enterHold(this.now(), "routing");
+    p.routing_hold_deadline ??= this.controller.hold?.deadline;
     this.suppressCurrentResponse("routing_hold");
     if (first)
       this.background(
@@ -468,6 +470,8 @@ export class VoiceBridge {
                       this.context.ivr_progress.evidence?.kind ?? null,
                     routing_candidate_at:
                       this.context.ivr_progress.routing_candidate_at ?? null,
+                    routing_hold_deadline:
+                      this.context.ivr_progress.routing_hold_deadline ?? null,
                   }),
                 }
               : {}),
@@ -709,6 +713,12 @@ export class VoiceBridge {
     if (!["nova-3", "flux-multi"].includes(model))
       throw Error("Unsupported outbound recognition model");
     return model;
+  }
+  routingHoldLimit() {
+    const limit = Number(this.env.OUTBOUND_ROUTING_HOLD_MS ?? 180000);
+    if (!Number.isInteger(limit) || limit < 10000 || limit > 180000)
+      throw Error("Unsupported routing hold limit");
+    return limit;
   }
   modelMustRemainSilent() {
     return !!(
@@ -1090,6 +1100,7 @@ export class VoiceBridge {
     this.controller = new CallController({
       now: this.now,
       stripCumulativeHistory: this.env.EXTERNAL_STT !== "true",
+      maxRoutingHoldMs: this.routingHoldLimit(),
       playFarewell:
         this.env.CONTROLLED_FAREWELL === "true"
           ? (outcome, op) => this.playControlledFarewell(outcome, op)
