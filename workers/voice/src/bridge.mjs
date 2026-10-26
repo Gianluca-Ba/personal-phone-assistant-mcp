@@ -280,6 +280,11 @@ export class VoiceBridge {
         this.context.call_id + ":send_dtmf:" + operation.operationId,
       );
     const baseline = this.controller.menu?.text ?? "";
+    this.context.ivr_dispatch = {
+      at: this.now(),
+      exact_menu_token: operation.exactMenuToken === true,
+      dispatch_guard: operation.dispatchGuard ?? "unspecified",
+    };
     await this.recordEvent("dtmf_requested", id, {
       command_id: id,
       digit: digits,
@@ -1524,6 +1529,12 @@ export class VoiceBridge {
           menu_age_ms: c.menu ? this.now() - c.menu.at : null,
           spent: !!c.menu?.spent,
           exact_token:
+            frame.item.name === "press_ivr_digit"
+              ? result.ok && this.context.ivr_dispatch?.exact_menu_token
+                ? true
+                : args?.menu_token === c.menu?.token
+              : null,
+          current_token_matches:
             frame.item.name === "press_ivr_digit"
               ? args?.menu_token === c.menu?.token
               : null,

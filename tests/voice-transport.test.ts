@@ -1315,6 +1315,22 @@ it("never treats a conditional menu label as a routing hold, and repeated transf
   expect(f.b.controller.pending?.outcome).toBe("unable_to_proceed");
   expect(f.b.context.ivr_progress.state).not.toBe("dialogue_candidate");
 });
+it("releases a routing hold for the recorded direct staff greeting and permits a short response", async () => {
+  const f = await dialogueFixture();
+  f.b.context.ivr_progress = {
+    state: "awaiting_transition",
+    command_id: "staff-greeting",
+    baseline: "その他のご質問は五を押してください。",
+  };
+  f.b.observeRoutingInterim("お電話を転送しております。");
+  f.recipient(
+    "お電話を転送しております。お電話ありがとうございます。アップル川崎です。",
+  );
+  expect(f.b.controller.hold).toBeNull();
+  expect(f.b.context.ivr_progress.state).toBe("dialogue_candidate");
+  await f.generate("answer-staff", "在庫について伺いたいのですが。");
+  expect(f.media.frames.some((m: any) => m.event === "media")).toBe(true);
+});
 it("validates the operator wait limit before creating any dial contract", async () => {
   const f = fixture();
   expect(f.b.routingHoldLimit()).toBe(180000);

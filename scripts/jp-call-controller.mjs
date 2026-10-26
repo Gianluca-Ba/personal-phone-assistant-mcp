@@ -736,6 +736,7 @@ export class CallController {
         return await this.sendDigit(args.digits, {
           operationId,
           dispatchGuard,
+          exactMenuToken: true,
         });
       } catch {
         return { ok: false, reason: "DELIVERY_UNCONFIRMED_DO_NOT_RETRY" };

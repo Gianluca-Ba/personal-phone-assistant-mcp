@@ -84,6 +84,26 @@ it("binds an advertised digit to a completed current menu and consumes its token
   ).toBe("STALE_OR_INCOMPLETE_MENU");
   expect(h.digits).toEqual(["2"]);
 });
+it("retains verified dispatch evidence when a new menu arrives during the provider request", async () => {
+  let op: any, done: any;
+  const h = harness((_digit: string, operation: any) => {
+    op = operation;
+    return new Promise((r) => {
+      done = r;
+    });
+  });
+  h.menu("その他のご質問は五を押してください。");
+  const s = await h.c.command("read", "read_current_menu", {});
+  const pending = h.c.command("select", "press_ivr_digit", {
+    digits: "5",
+    menu_token: s.menu_token,
+  });
+  h.menu("営業時間は一を押してください。");
+  expect(h.c.menu.token).not.toBe(s.menu_token);
+  expect(op.exactMenuToken).toBe(true);
+  done({ ok: true });
+  expect((await pending).ok).toBe(true);
+});
 it("reserves before concurrent delivery and does not retry an uncertain provider response", async () => {
   let resolve: any,
     calls = 0;

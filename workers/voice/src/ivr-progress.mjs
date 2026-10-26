@@ -3,6 +3,7 @@ import {
   isRoutingHold,
   isHoldRequest,
   isHoldFiller,
+  isHoldReturn,
 } from "../../../scripts/jp-backchannel.mjs";
 export const menuText = (text) =>
   text
@@ -64,11 +65,13 @@ export function progressEvidence(baseline, transcript, seen = []) {
     return { kind: "information_announcement", digest: sha256(text) };
   if (
     !ivr.test(transcript) &&
+    !/[「」『』“”"]/.test(transcript) &&
     !isHoldRequest(transcript) &&
     !isHoldFiller(transcript) &&
-    (/お待たせ(?:いた)?しました|担当の.{1,12}(?:です|でございます)|ご用件(?:を|は)|どのような|もしもし|お名前|お声.{0,12}届|聞こえ|確認(?:できました|が取れました)|(?:アップル|Apple)(?:ストア)?[、,\s]*川崎(?:店)?(?:の|[、,\s])[^。！？]{1,20}(?:です|でございます)|how (?:may|can) I help|thank you for (?:holding|waiting)/i.test(
-      transcript,
-    ) ||
+    (isHoldReturn(transcript) ||
+      /お待たせ(?:いた)?しました|担当の.{1,12}(?:です|でございます)|ご用件(?:を|は)|どのような|もしもし|お名前|お声.{0,12}届|聞こえ|確認(?:できました|が取れました)|(?:アップル|Apple)(?:ストア)?[、,\s]*川崎(?:店)?(?:の|[、,\s])[^。！？]{1,20}(?:です|でございます)|how (?:may|can) I help|thank you for (?:holding|waiting)/i.test(
+        transcript,
+      ) ||
       /(?:でしょうか|ですか|ますか)[。?？\s]*$/.test(transcript))
   )
     return { kind: "human_greeting_candidate", digest: sha256(text) };

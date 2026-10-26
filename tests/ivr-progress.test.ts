@@ -108,6 +108,32 @@ it("bounds supported DTMF duration and no-transition waiting without a transmiss
       dtmfTuning({ OUTBOUND_IVR_TRANSITION_TIMEOUT_MS: timeout }),
     ).toThrow();
 });
+it("recognizes the recorded staff greeting after routing without requiring moshi-moshi", () => {
+  for (const greeting of [
+    "お電話ありがとうございます。アップル川崎です。",
+    "AppleStore銀座のテストです。",
+    "Apple丸の内店舗案内です。",
+  ]) {
+    expect(progressEvidence(baseline, greeting)).toMatchObject({
+      kind: "human_greeting_candidate",
+    });
+    expect(
+      progressEvidence(baseline, "お電話を転送しております。" + greeting),
+    ).toMatchObject({ kind: "human_greeting_candidate" });
+    expect(
+      progressEvidence(baseline, greeting + "少々お待ちください。")?.kind,
+    ).not.toBe("human_greeting_candidate");
+    expect(
+      progressEvidence(baseline, "「" + greeting + "」と言っています。")?.kind,
+    ).not.toBe("human_greeting_candidate");
+  }
+  expect(
+    progressEvidence(
+      baseline,
+      "AppleStore銀座にお電話いただきありがとうございます。",
+    ),
+  ).toBeNull();
+});
 
 it("recognizes a fact-bearing address/hours announcement as observable IVR progress, never human contact", () => {
   const hoursMenu = "営業時間やアクセスのご案内については1を押してください。";

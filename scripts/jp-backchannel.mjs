@@ -17,7 +17,7 @@ const holdRequest =
 const holdNegation =
   /待(?:た|つ|って|ち)[^。！？]{0,30}(?:必要は(?:ありま|ございま)せん|必要(?:が|は)ない|不要|なくて(?:も|結構)|(?:いただか|頂か)なくて)/;
 const holdReturn =
-  /お待たせ(?:しました|いたしました|致しました)|お待ち(?:どうさま|どおさま)|確認(?:できました|が取れました)|もしもし|thank you for (?:holding|waiting)/i;
+  /お待たせ(?:しました|いたしました|致しました)|お待ち(?:どうさま|どおさま)|確認(?:できました|が取れました)|もしもし|お電話ありがとうございます(?:[。.!！、,\s]|$)|(?:Apple|アップル)(?:Store|ストア)?[、,\s]*(?:川崎|カワサキ|銀座|ギンザ|丸の内|マルノウチ)(?:店|ストア)?(?:店舗案内)?(?:[、,\s]|の.{1,12})?(?:です|でございます)|thank you for (?:holding|waiting)/i;
 // A direct first-person checking commitment commonly precedes a silent hold.
 // Require the affirmative commitment at the end, never a question or a quote.
 const verificationPause =
@@ -54,8 +54,10 @@ export const isHoldRequest = (text) => {
     !holdNegation.test(value)
   );
 };
-export const isHoldReturn = (text) =>
-  holdReturn.test(normalizeJapaneseTurn(text));
+export const isHoldReturn = (text) => {
+  const value = normalizeJapaneseTurn(text);
+  return !/[「」『』“”"]/.test(value) && holdReturn.test(value);
+};
 const ongoingWaitApology =
   /^(?:(?:大変|長らく|長時間)[、,\s]*)?お待たせ(?:しております|しています|して(?:しまい)?(?:申し訳(?:ございません|ありません)|すみません))(?:[。.!！\s]*(?:大変)?申し訳(?:ございません|ありません))?[。.!！\s]*$/;
 export const isHoldFiller = (text) =>
