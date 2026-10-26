@@ -1,7 +1,26 @@
 import { expect, it } from "vitest";
-const { SttTurns, genuineInterruption } = await import(
+const { SttTurns, genuineInterruption, isAudibilityCheck } = await import(
   new URL("../workers/voice/src/turns.mjs", import.meta.url).href
 );
+it("distinguishes pure audibility checks from task questions, corrections, holds and quoted speech", () => {
+  for (const text of [
+    "もしもし。",
+    "もしもし？",
+    "お声届いておりますでしょうか？",
+    "お客様、お声は届いておりますでしょうか?Apple丸の内につながっております。",
+    "客様お声は届いておりますでしょうか?丸土地につながっております。",
+  ])
+    expect(isAudibilityCheck(text), text).toBe(true);
+  for (const text of [
+    "もしもし、やめてください。",
+    "もしもし、在庫はありますか？",
+    "お声は届いていますか？少々お待ちください。",
+    "『もしもし』と言っていました。",
+    "はい、予約を変更してください。",
+    "お声は届いていますか？支払いを承認しているところです。",
+  ])
+    expect(isAudibilityCheck(text), text).toBe(false);
+});
 it("commits each Flux turn once and ignores normalized duplicate finals", () => {
   const final: string[] = [];
   let starts = 0;

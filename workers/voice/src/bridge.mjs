@@ -5,6 +5,7 @@ import {
   SttTurns,
   genuineInterruption,
   classifyRecipientTurn,
+  isAudibilityCheck,
 } from "./turns.mjs";
 import { composeOutboundTask, speechViolation } from "./spoken-policy.mjs";
 import { SilenceWatchdog } from "./silence.mjs";
@@ -464,6 +465,9 @@ export class VoiceBridge {
             system_farewell_played: this.context.system_farewell_played
               ? "true"
               : "false",
+            deferred_audibility_checks: String(
+              this.context.deferred_audibility_checks ?? 0,
+            ),
             ...(this.context.ivr_gate
               ? { voice_ivr_gate: JSON.stringify(this.context.ivr_gate) }
               : {}),
@@ -694,6 +698,20 @@ export class VoiceBridge {
         this.marks?.pending.size > 0 ||
         (this.controller.responseActive &&
           this.responses.get(this.controller.responseId)?.rendered > 0))
+    );
+  }
+  deferInitialAudibilityCheck(text) {
+    const first = this.context.initial_dialogue_response;
+    const response = first && this.responses.get(first.id);
+    return !!(
+      first &&
+      first.id === this.controller?.responseId &&
+      this.now() - first.started_at < 10000 &&
+      response &&
+      !response.suppressed &&
+      !this.modelMustRemainSilent() &&
+      (!response.completed || this.speakingOutput()) &&
+      isAudibilityCheck(text)
     );
   }
   cancelOutput() {
@@ -1011,7 +1029,12 @@ export class VoiceBridge {
       preserve_hold: preserveRoutingHold,
     });
     const turn = classifyRecipientTurn(text, { overlapped: this.overlapped });
-    const listening = turn.kind === "backchannel" || holdFiller;
+    const deferredCheck = this.deferInitialAudibilityCheck(text);
+    const listening =
+      turn.kind === "backchannel" || holdFiller || deferredCheck;
+    if (deferredCheck)
+      this.context.deferred_audibility_checks =
+        (this.context.deferred_audibility_checks ?? 0) + 1;
     const expiredHoldRepeated =
       this.controller.holdExpired && turn.kind === "hold_request";
     if (!listening) {
@@ -1178,7 +1201,8 @@ export class VoiceBridge {
           if (
             this.overlapped &&
             !this.currentHoldFiller(text) &&
-            genuineInterruption(text)
+            genuineInterruption(text) &&
+            !this.deferInitialAudibilityCheck(text)
           )
             this.cancelOutput();
         },
@@ -1351,6 +1375,12 @@ export class VoiceBridge {
         createdAt: this.now(),
         suppressed: this.modelMustRemainSilent(),
       });
+      if (
+        !this.context.initial_dialogue_response &&
+        this.context.ivr_progress?.state === "dialogue_candidate" &&
+        !this.responses.get(id).suppressed
+      )
+        this.context.initial_dialogue_response = { id, started_at: this.now() };
       if (this.responses.get(id).suppressed)
         this.controller?.event({
           type: "assistant_completed",

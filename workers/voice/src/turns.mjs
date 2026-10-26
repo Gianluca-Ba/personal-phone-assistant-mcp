@@ -212,3 +212,32 @@ export function classifyRecipientTurn(text, { overlapped = false } = {}) {
 }
 export const genuineInterruption = (text) =>
   classifyRecipientTurn(text).interrupt;
+
+// Audibility checks can repeat while the first short reply is still being
+// generated. This classifier conveys no authorization and accepts no task data.
+export function isAudibilityCheck(text) {
+  const value = normalizeJapaneseTurn(text);
+  if (value.length > 140 || /[「」『』“”"]/.test(value)) return false;
+  const parts = value
+    .split(/[。.!！?？\n]/)
+    .map((s) => s.replace(/[、,\s]/g, ""))
+    .filter(Boolean);
+  const first = parts.shift() ?? "";
+  const check =
+    /^(?:もしもし){1,2}$/.test(first) ||
+    /^(?:お?客様)?(?:こちらの)?(?:お声|音声|声)(?:は|が)?(?:届いて|聞こえて)(?:おります|います|いらっしゃいます)(?:でしょう)?か(?:ね)?$/.test(
+      first,
+    ) ||
+    /^(?:こちらの)?(?:声|音声|お声)?(?:は|が)?聞こえますか$/.test(first);
+  return (
+    check &&
+    parts.every(
+      (s) =>
+        s.length <= 45 &&
+        /(?:につながっております|店舗案内です)$/.test(s) &&
+        !/予約|在庫|支払|承認|購入|変更|やめ|待|停止|質問|番号|暗証|送金/.test(
+          s,
+        ),
+    )
+  );
+}

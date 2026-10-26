@@ -920,6 +920,84 @@ async function dialogueFixture() {
   };
   return { ...f, media, generate, recipient };
 }
+it("lets the first validated reply finish through repeated audibility checks, with a fixed nonrenewable grace", async () => {
+  const f = await dialogueFixture();
+  f.b.context.ivr_progress = { state: "dialogue_candidate", baseline: "" };
+  f.recipient("お電話ありがとうございます。丸の内です。");
+  await f.b.onVoice({
+    type: "response.created",
+    response: { id: "first-audible" },
+  });
+  const pcm = Buffer.alloc(3200);
+  for (let i = 0; i < 1600; i++)
+    pcm.writeInt16LE(
+      Math.round(5000 * Math.sin((2 * Math.PI * 440 * i) / 8000)),
+      i * 2,
+    );
+  await f.b.onVoice({
+    type: "response.output_audio.delta",
+    response_id: "first-audible",
+    delta: pcm.toString("base64"),
+  });
+  const before = f.b.voice.frames.length;
+  const startedAt = f.b.context.initial_dialogue_response.started_at;
+  // Approximate offsets from the first assistant entry in the Marunouchi
+  // transcript; these are regression timings, not inference measurements.
+  f.advance(1590);
+  f.recipient("もしもし。");
+  f.advance(5179);
+  f.recipient("お声は届いておりますでしょうか？");
+  expect(
+    f.b.voice.frames
+      .slice(before)
+      .some((x: any) => x.type === "response.cancel"),
+  ).toBe(false);
+  expect(f.b.context.deferred_audibility_checks).toBe(2);
+  expect(f.b.context.initial_dialogue_response.started_at).toBe(startedAt);
+  expect(f.media.frames.some((x: any) => x.event === "media")).toBe(false);
+  await f.b.onVoice({
+    type: "response.output_audio_transcript.delta",
+    response_id: "first-audible",
+    delta: "はい、聞こえています。",
+  });
+  await f.b.onVoice({
+    type: "response.done",
+    response: { id: "first-audible", status: "completed" },
+  });
+  expect(f.media.frames.some((x: any) => x.event === "media")).toBe(true);
+  const emitted = f.media.frames.filter((x: any) => x.event === "media");
+  expect(emitted).toHaveLength(10);
+  expect(
+    emitted.some((x: any) =>
+      Buffer.from(x.media.payload, "base64").some(
+        (b: number) => b !== 255 && b !== 127,
+      ),
+    ),
+  ).toBe(true);
+  f.advance(3232);
+  expect(f.b.deferInitialAudibilityCheck("もしもし。")).toBe(false);
+});
+it("never defers real instructions, changed task details or audibility checks on a later response", async () => {
+  for (const text of [
+    "ちょっと待ってください。",
+    "もしもし、在庫はありません。",
+    "違います、予約を変更してください。",
+  ]) {
+    const f = await dialogueFixture();
+    f.b.context.ivr_progress = { state: "dialogue_candidate", baseline: "" };
+    await f.b.onVoice({ type: "response.created", response: { id: "first" } });
+    f.recipient(text);
+    expect(f.b.responses.get("first").suppressed).toBe(true);
+    expect(f.b.context.deferred_audibility_checks ?? 0).toBe(0);
+  }
+  const f = await dialogueFixture();
+  f.b.context.ivr_progress = { state: "dialogue_candidate", baseline: "" };
+  await f.generate("first", "はい、聞こえています。");
+  f.advance(2000);
+  await f.b.onVoice({ type: "response.created", response: { id: "second" } });
+  f.recipient("もしもし。");
+  expect(f.b.responses.get("second").suppressed).toBe(true);
+});
 it("holds audio until the complete utterance is checked, then releases every frame once", async () => {
   const f = await dialogueFixture();
   await f.b.onVoice({ type: "response.created", response: { id: "bounded" } });
