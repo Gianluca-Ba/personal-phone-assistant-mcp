@@ -482,6 +482,13 @@ export class VoiceBridge {
                   ),
                 }
               : {}),
+            ...(this.context.ivr_gate_history
+              ? {
+                  voice_ivr_gate_history: JSON.stringify(
+                    this.context.ivr_gate_history,
+                  ),
+                }
+              : {}),
             transcript_source:
               this.env.EXTERNAL_STT === "true"
                 ? "external_stt_" + this.recognitionModel().replaceAll("-", "_")
@@ -1521,6 +1528,18 @@ export class VoiceBridge {
               ? args?.menu_token === c.menu?.token
               : null,
         };
+        this.context.ivr_gate_history = [
+          ...(this.context.ivr_gate_history ?? []),
+          {
+            at: this.now(),
+            tool: frame.item.name,
+            ok: result.ok,
+            reason: result.reason ?? null,
+            exact_token: this.context.ivr_gate.exact_token,
+            complete: !!c.menu?.complete,
+            spent: !!c.menu?.spent,
+          },
+        ].slice(-4);
         // Diagnostic metadata is best effort and never part of consent, action
         // readiness or the tool response's provider deadline. No raw text/token.
         this.background(

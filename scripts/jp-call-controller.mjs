@@ -39,9 +39,7 @@ const replayText = (value) =>
     .toLowerCase()
     .replace(/[、。，,.!！\s]/g, "");
 const replayIntroduction = (value) =>
-  normalize(value).match(
-    /次の([2-9])(?:つ|個)(?:の中)?から(?:ご希望|希望)(?:の)?(?:番号|項目)を(?:選択してください|お選びください)/,
-  );
+  normalize(value).match(/次の([2-9])(?:つ|個)(?:の中)?から/);
 // Conservative signals from authenticated recipient transcripts. Quoted,
 // hypothetical and interrogative wording is not a terminal declaration.
 export function recipientTerminalSignal(value) {
@@ -263,6 +261,26 @@ export class CallController {
       this.menuReplayToken = null;
       this.menuReplayUntil = 0;
       const raw = normalize(e.transcript ?? "");
+      // STT can commit the last choice and the start of the replay together.
+      // Finish the old announcement before processing the new introduction;
+      // otherwise its count would discard the very choice just received.
+      const boundary = [
+        ...raw.matchAll(/次の[2-9](?:つ|個)(?:の中)?から/g),
+      ].find(
+        (m) =>
+          m.index > 0 &&
+          /押してくだ(?:さい|い)[。\s]*$/.test(raw.slice(0, m.index)),
+      );
+      if (boundary && (this.menuAssembly || this.menu?.complete)) {
+        const tail = raw.slice(0, boundary.index).trim();
+        if (
+          !this.menu?.complete ||
+          !replayText(this.menu.text).endsWith(replayText(tail))
+        )
+          this.event({ ...e, transcript: tail });
+        this.event({ ...e, transcript: raw.slice(boundary.index) });
+        return;
+      }
       const old = this.lastRawTranscript;
       const cumulative =
         this.stripCumulativeHistory &&
@@ -419,15 +437,19 @@ export class CallController {
           this.menu.replayContent = replayText(body);
         }
       }
-      const genericReplayIntro =
-        /選択|メニュー|お選び|menu|select/i.test(fragment) &&
-        !/([0-9*#])(?:番)?(?:を|に|です|[、,]|\s)/.test(fragment);
+      const exactReplayPrefix =
+        !/[「」『』“”"?？]|違|変更|ではなく|いいえ|もしもし|ご用件|担当者/.test(
+          fragment,
+        ) &&
+        previousMenu?.replayIntro &&
+        replayText(fragment).startsWith(replayText(previousMenu.replayIntro)) &&
+        previousMenu.replayContent?.startsWith(replayText(fragment));
       if (
         previousMenu?.complete &&
         previousMenu.digits.length &&
         !previousMenu.spent &&
         at - previousMenu.at < 30000 &&
-        (genericReplayIntro || this.menu.core === previousMenu.core)
+        (exactReplayPrefix || this.menu.core === previousMenu.core)
       ) {
         // The original completed choice snapshot stays immutable through a replay intro.
         this.menu = previousMenu;

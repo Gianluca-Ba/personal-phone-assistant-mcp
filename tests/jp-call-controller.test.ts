@@ -634,7 +634,7 @@ it("does not treat a choice-free IVR introduction as the end of the menu or task
 });
 it("queues a selection against the exact immutable menu through a replay introduction", async () => {
   const h = harness();
-  h.menu("サポートは二を、その他のご質問は五を押してください。");
+  h.menu(appleIntro + appleChoices);
   const snapshot = await h.c.command("read", "read_current_menu", {});
   h.c.event({ type: "input_audio_buffer.speech_started" });
   const select = h.c.command("select", "press_ivr_digit", {
@@ -658,6 +658,67 @@ it("queues a selection against the exact immutable menu through a replay introdu
     menu_token: snapshot.menu_token,
   });
   expect(h.digits).toHaveLength(1);
+});
+it("finishes the final option before a bundled partial replay introduction and retains the exact token", async () => {
+  const h = harness();
+  h.menu("次の四つの中から");
+  h.advance(1500);
+  h.menu("ご希望の番号を選択してくだい。");
+  h.advance(4000);
+  h.menu("営業時間は一を、サポートは二を、法人は三を、その他のご質問は");
+  h.advance(4000);
+  h.menu("五を押してください。 次の四つの中から");
+  const snapshot = await h.c.command("bundled-read", "read_current_menu", {});
+  expect(snapshot.advertised_digits).toEqual(["1", "2", "3", "5"]);
+  h.c.event({ type: "input_audio_buffer.speech_started" });
+  const pending = h.c.command("bundled-select", "press_ivr_digit", {
+    digits: "5",
+    menu_token: snapshot.menu_token,
+  });
+  h.c.event({ type: "input_audio_buffer.speech_stopped" });
+  h.c.event({
+    type: "conversation.item.input_audio_transcription.completed",
+    transcript: "次の四つの中から",
+  });
+  h.advance(800);
+  await h.c.tick();
+  expect((await pending).ok).toBe(true);
+  expect(h.digits).toEqual(["5"]);
+  expect(h.c.menu.token).toBe(snapshot.menu_token);
+});
+it("does not retain a stale token for an unobserved, changed, quoted or extended replay prefix", async () => {
+  for (const text of [
+    "次の三つの中から",
+    "次の四つの中から購入は九を押してください。",
+    "「次の四つの中から」と言っています。",
+    "もしもし、ご用件は何ですか？",
+  ]) {
+    const h = harness();
+    h.menu(appleIntro + appleChoices);
+    const s = await h.c.command("read", "read_current_menu", {});
+    h.menu(text);
+    expect(
+      (
+        await h.c.command("select", "press_ivr_digit", {
+          digits: "5",
+          menu_token: s.menu_token,
+        })
+      ).ok,
+    ).toBe(false);
+    expect(h.digits).toEqual([]);
+  }
+  const h = harness();
+  h.menu("サポートは二を、その他のご質問は五を押してください。");
+  const s = await h.c.command("read", "read_current_menu", {});
+  h.menu(appleIntro);
+  expect(
+    (
+      await h.c.command("select", "press_ivr_digit", {
+        digits: "5",
+        menu_token: s.menu_token,
+      })
+    ).ok,
+  ).toBe(false);
 });
 it("never retargets a queued selection when a human or a different menu intervenes", async () => {
   for (const text of [
