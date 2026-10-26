@@ -234,6 +234,8 @@ it("opens verified Japanese Nova-3 recognition without unsupported Flux paramete
   );
   expect(url.searchParams.get("model")).toBe("nova-3");
   expect(url.searchParams.get("language")).toBe("ja");
+  expect(url.searchParams.get("input_format")).toBe("linear16");
+  expect(url.searchParams.get("sample_rate")).toBe("8000");
   expect(url.searchParams.has("eot_threshold")).toBe(false);
   expect(url.searchParams.has("eot_timeout_ms")).toBe(false);
   expect(
@@ -258,6 +260,49 @@ it("opens verified Japanese Nova-3 recognition without unsupported Flux paramete
     "Unsupported outbound recognition model",
   );
   expect(bad.network).toEqual([]);
+});
+it("decodes each live recognition frame into paced 8kHz little-endian PCM, padding silence", async () => {
+  vi.useFakeTimers();
+  const f = fixture();
+  f.env.EXTERNAL_STT = "true";
+  await f.register();
+  const frames: Buffer[] = [];
+  f.b.stt = {
+    readyState: 1,
+    send: (data: Buffer) => frames.push(Buffer.from(data)),
+  };
+  await f.b.attachMedia(new Socket());
+  f.b.sttQueue = [0, 128, 255];
+  await vi.advanceTimersByTimeAsync(40);
+  expect(frames).toHaveLength(2);
+  expect(frames[0].length).toBe(320);
+  expect([0, 2, 4].map((offset) => frames[0].readInt16LE(offset))).toEqual([
+    -32124, 32124, 0,
+  ]);
+  expect(frames[0].subarray(6).every((value) => value === 0)).toBe(true);
+  expect(frames[1].equals(Buffer.alloc(320))).toBe(true);
+});
+it("counts final recognition and delivered menu evidence without retaining transcript text", async () => {
+  const f = fixture();
+  await f.register();
+  f.b.observeRecognitionFrame({
+    transcript: "五を押してください。",
+    is_final: false,
+  });
+  f.b.observeRecognitionFrame({
+    transcript: "五を押してください。",
+    is_final: true,
+  });
+  expect(f.b.context.stt_observations).toEqual({
+    frames: 2,
+    text_finals: 1,
+    raw_five_finals: 1,
+    delivered_five: 0,
+    input_format: "linear16",
+  });
+  expect(JSON.stringify(f.b.context.stt_observations)).not.toContain(
+    "押してください",
+  );
 });
 it("roundtrips telephony PCM in 20ms mu-law frames without dropping partial codec groups", () => {
   for (const rate of [8000, 16000, 24000]) {

@@ -38,7 +38,7 @@ Supported surfaces: [Telnyx streaming models](https://developers.telnyx.com/docs
 
 Test six used Nova-3 Japanese and dispatched the single digit during ordinary recipient quiet (27.5 s after answer, versus about 33 s in the preceding Flux trials). A routing transition was observed, but no useful answer arrived within the 90-second hold; the matching signed completion callback confirmed the farewell before closure. This is one timing observation, not a general latency benchmark. To avoid repeatedly abandoning a verified operator queue, routing holds now have a separate default ceiling of 180 seconds (`OUTBOUND_ROUTING_HOLD_MS`, permitted 10–180 seconds). Ordinary requested/checking holds remain limited to 90 seconds. Neither repeated announcements nor music renew either lease; the existing 300-second total carrier limit is unchanged.
 
-## Final real-call result
+## Initial successful real-call result
 
 The run stopped early after **7 of the 10 authorized calls**. Call seven reached an interactive recipient: the recipient requested repetition, answered the inventory question, and explained how to check again. A separate Japanese retranscription of the recorded inbound channel corroborates the business answer. Private call identities, complete transcripts and recordings remain ignored by git.
 
@@ -55,3 +55,13 @@ The run stopped early after **7 of the 10 authorized calls**. Call seven reached
 There were no duplicate DTMF commands within a call. In call seven the signed closing playback completed at 03:11:10.278855 UTC, the hangup command followed at 03:11:11.590133 UTC, and the carrier hangup event followed at 03:11:12.232960 UTC. Completion of the informational task does not mean product availability or a purchase was confirmed.
 
 The transcript also exposed a bundled handoff: the recorded transfer announcement and the later live `もしもし` arrived in one final STT message. The final refinement honors cue order so that a later return releases the historical routing hold, while a later request to keep waiting still retains it. Regression fixtures replay the observed mixed message through both the detector and real bridge. This last small refinement was validated automatically; no further PSTN call was made after the successful seventh trial. General recognition accuracy and low PSTN latency are not certified by these few calls.
+
+## Subsequent owner-requested follow-up
+
+The owner subsequently requested another focused informational call and then a conditional free reservation, with no payment, deposit or purchase obligation. The total ceiling remains ten calls. The eighth call ended remotely after 55 seconds without a DTMF command: the live recognition stream did not expose the final option. No operator was reached and no reservation was made. This regression means the seventh call does not establish general reliability.
+
+A no-call real-time replay of the eighth recording as 8 kHz linear PCM through both Nova-3 Japanese and Flux recognized the final option. The production sidecar now explicitly sends decoded little-endian linear16 at the same sample rate, preserving 20 ms pacing and the original mu-law acoustic activity analysis. This aligns with the successful replay; it does not prove the original recognition failure was solely a codec issue. Private metadata records only frame/final/delivery counts for that option, never raw transcripts or credentials, to distinguish upstream recognition from local delivery if it recurs.
+
+Nova-3 commits menu introductions, option labels and digits separately, often more than 750 ms apart. Incomplete menus now assemble those fragments for at most 30 seconds and 4096 characters. An explicit advertised option count must be satisfied before exposing a token. Human questions/returns, hold requests, restarted menus, expiry and consuming a selection discard the assembly. Existing immutable tokens, sensitive-choice protection, exact advertised digits and one-time delivery remain required. Regression fixtures include paced Japanese options, a missing final choice, interruption/restart/expiry, and exact 8 kHz PCM sample vectors and silence padding. No inbound or provider configuration is changed.
+
+Follow-up validation: 224/224 tests passed, with no skipped tests; type checking, 24 legacy plus 29 guarded phone-contract checks, 11 workerd checks, all build targets and the preserved production configuration dry run passed. PSTN confirmation of the latest recognition changes remains a separate bounded test.

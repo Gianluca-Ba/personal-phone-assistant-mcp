@@ -343,6 +343,58 @@ it("exposes a complete menu snapshot during replay without authorizing a digit o
   expect(h.digits).toEqual([]);
 });
 const appleIntro = "次の四つの中からご希望の番号を選択してください。";
+it("assembles paced Japanese option fragments without inventing a missing final choice", async () => {
+  const h = harness();
+  h.menu(appleIntro);
+  for (const text of [
+    "営業時間については、",
+    "一を押してください。",
+    "AppleCareへの転送は、",
+    "二を押してください。",
+    "法人のお客様は、",
+    "三を押してください。",
+    "その他のお問い合わせは、",
+  ]) {
+    h.advance(1800);
+    h.menu(text);
+    expect(h.c.menuSnapshotReady()).toBe(false);
+  }
+  h.advance(1800);
+  h.menu("五を押してください。");
+  const state = await h.c.command("assembled-menu", "read_current_menu", {});
+  expect(state.advertised_digits).toEqual(["1", "2", "3", "5"]);
+  expect(h.c.menu.text).toContain(
+    "その他のお問い合わせは、5を押してください。",
+  );
+  expect(h.c.menu.text).toContain("AppleCareへの転送は、2を押してください。");
+  await h.c.command("assembled-choice", "press_ivr_digit", {
+    digits: "5",
+    menu_token: state.menu_token,
+  });
+  expect(h.digits).toEqual(["5"]);
+  expect(h.c.menuAssembly).toBeNull();
+});
+it("discards incomplete menu assembly on human questions, changed announcements and expiry", () => {
+  for (const interruption of [
+    "もしもし、ご用件は何ですか？",
+    "次の二つから番号を選択してください。",
+    "お待ちください。",
+    "はい。",
+  ]) {
+    const h = harness();
+    h.menu(appleIntro);
+    h.advance(6000);
+    h.menu(interruption);
+    h.menu("五を押してください。");
+    expect(h.c.menu.text).not.toContain("次の4つ");
+    expect(h.digits).toEqual([]);
+  }
+  const h = harness();
+  h.menu(appleIntro);
+  h.advance(30000);
+  h.menu("五を押してください。");
+  expect(h.c.menu.text).not.toContain("次の4つ");
+});
 const appleChoices =
   "営業時間や道順については一を、サポートは二を、法人のお客様は三を、その他のご質問は五を押してください。";
 it("sends an exact-token selection during a recognized replay of the same complete menu, without closing or duplicating", async () => {

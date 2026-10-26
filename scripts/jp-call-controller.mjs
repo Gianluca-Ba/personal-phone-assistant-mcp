@@ -272,10 +272,40 @@ export class CallController {
         /[。.!?]|押してください$/.test(old);
       const fragment = cumulative ? raw.slice(old.length).trimStart() : raw;
       this.lastRawTranscript = raw;
-      if (this.lastTranscript === null || at - this.lastTranscript > 750)
-        this.inputText = "";
-      if (fragment.startsWith(this.inputText)) this.inputText = fragment;
-      else if (!this.inputText.endsWith(fragment)) this.inputText += fragment;
+      const countMatch = fragment.match(/次の([2-9])(?:つ|個)/);
+      const interruptedMenu =
+        isHoldReturn(fragment) ||
+        isHoldRequest(fragment) ||
+        isBackchannel(fragment) ||
+        !!recipientTerminalSignal(fragment) ||
+        /[?？]|(?:ですか|ますか|でしょうか)[。\s]*$/.test(fragment);
+      const assembly = this.menuAssembly;
+      const continueMenu =
+        assembly &&
+        !interruptedMenu &&
+        at - assembly.startedAt < 30000 &&
+        !(countMatch && at - assembly.startedAt > 5000);
+      if (continueMenu) {
+        this.inputText = fragment.startsWith(assembly.text)
+          ? fragment
+          : assembly.text.endsWith(fragment)
+            ? assembly.text
+            : assembly.text + fragment;
+      } else {
+        this.menuAssembly = null;
+        if (
+          assembly ||
+          this.lastTranscript === null ||
+          at - this.lastTranscript > 750
+        )
+          this.inputText = "";
+        if (fragment.startsWith(this.inputText)) this.inputText = fragment;
+        else if (!this.inputText.endsWith(fragment)) this.inputText += fragment;
+      }
+      if (this.inputText.length > 4096) {
+        this.inputText = fragment;
+        this.menuAssembly = null;
+      }
       this.lastTranscript = at;
       const text = this.inputText;
       const previousMenu = this.menu;
@@ -351,6 +381,27 @@ export class CallController {
           ),
         ],
       };
+      const expected = countMatch
+        ? Number(countMatch[1])
+        : continueMenu
+          ? assembly.expected
+          : null;
+      if (expected && this.menu.digits.length < expected)
+        this.menu.complete = false;
+      const partialMenu =
+        !interruptedMenu &&
+        (!this.menu.complete || !this.menu.digits.length) &&
+        (continueMenu ||
+          countMatch ||
+          this.menu.isIvr ||
+          /[0-9*#](?:番)?を/.test(fragment));
+      this.menuAssembly = partialMenu
+        ? {
+            text: this.inputText,
+            startedAt: continueMenu ? assembly.startedAt : at,
+            expected,
+          }
+        : null;
       const intro = replayIntroduction(text);
       const previousIntro = previousMenu?.replayIntro;
       const inherited =
@@ -381,6 +432,7 @@ export class CallController {
         // The original completed choice snapshot stays immutable through a replay intro.
         this.menu = previousMenu;
         this.inputText = previousMenu.text;
+        this.menuAssembly = null;
       }
     }
     if (e.type === "system_farewell_completed") {
@@ -621,6 +673,7 @@ export class CallController {
       // Reserve before awaiting any side effect: concurrent or uncertain requests
       // cannot execute the same selection again.
       m.spent = true;
+      this.menuAssembly = null;
       this.inputText = "";
       this.lastTranscript = null;
       this.depth++;

@@ -475,6 +475,13 @@ export class VoiceBridge {
                   }),
                 }
               : {}),
+            ...(this.context.stt_observations
+              ? {
+                  voice_stt_observations: JSON.stringify(
+                    this.context.stt_observations,
+                  ),
+                }
+              : {}),
             transcript_source:
               this.env.EXTERNAL_STT === "true"
                 ? "external_stt_" + this.recognitionModel().replaceAll("-", "_")
@@ -611,7 +618,7 @@ export class VoiceBridge {
     const query = new URLSearchParams({
       transcription_engine: "Deepgram",
       model: this.recognitionModel(),
-      input_format: "mulaw",
+      input_format: "linear16",
       sample_rate: "8000",
       language: "ja",
       interim_results: "true",
@@ -638,7 +645,9 @@ export class VoiceBridge {
     this.stt.accept();
     this.stt.addEventListener("message", (e) => {
       try {
-        this.turns?.accept(JSON.parse(e.data));
+        const frame = JSON.parse(e.data);
+        this.observeRecognitionFrame(frame);
+        this.turns?.accept(frame);
       } catch {
         this.background(this.fail("stt_error"));
       }
@@ -719,6 +728,21 @@ export class VoiceBridge {
     if (!Number.isInteger(limit) || limit < 10000 || limit > 180000)
       throw Error("Unsupported routing hold limit");
     return limit;
+  }
+  observeRecognitionFrame(frame) {
+    const s = (this.context.stt_observations ??= {
+      frames: 0,
+      text_finals: 0,
+      raw_five_finals: 0,
+      delivered_five: 0,
+      input_format: "linear16",
+    });
+    s.frames++;
+    if ((frame.is_final || frame.event === "EndOfTurn") && frame.transcript) {
+      s.text_finals++;
+      if (/[五5].{0,6}押してください/.test(frame.transcript))
+        s.raw_five_finals++;
+    }
   }
   modelMustRemainSilent() {
     return !!(
@@ -959,6 +983,8 @@ export class VoiceBridge {
   }
   deliverTranscript(text) {
     if (this.ended || this.failing) return;
+    if (this.context.stt_observations && /[五5].{0,6}押してください/.test(text))
+      this.context.stt_observations.delivered_five++;
     const holdFiller = this.currentHoldFiller(text);
     const p = this.context.ivr_progress;
     const evidence = p ? progressEvidence(p.baseline, text) : null;
@@ -1169,7 +1195,7 @@ export class VoiceBridge {
             ])
           : Buffer.alloc(160, 255);
         this.activity.observe(frame);
-        if (this.stt?.readyState === 1) this.stt.send(frame);
+        if (this.stt?.readyState === 1) this.stt.send(decodeMuLaw(frame));
       }, 20);
     }
     this.timer = setInterval(() => {
