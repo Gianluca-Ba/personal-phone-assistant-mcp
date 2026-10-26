@@ -14,6 +14,12 @@ it("never infers a transition from the same menu, a partial repetition or a choi
     expect(progressEvidence(baseline, text)).toBeNull();
   expect(menuText("五を 押してください。")).toBe(menuText("5を押してください"));
 });
+it("never declares progression from a kana-only numeric transcription variation", () => {
+  const original = "サポートは二を、その他のご質問は五を押してください。";
+  const kana = "サポートは ニを、その他のご質問はゴーを押してください。";
+  expect(menuText(original)).toBe(menuText(kana));
+  expect(progressEvidence(original, kana)).toBeNull();
+});
 it("distinguishes routing observations and a new submenu from conditional option labels", () => {
   expect(
     progressEvidence(baseline, "担当者におつなぎいたします。"),

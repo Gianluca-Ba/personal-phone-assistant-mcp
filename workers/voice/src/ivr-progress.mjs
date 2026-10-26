@@ -1,4 +1,5 @@
 import { sha256 } from "./security.mjs";
+import { normalizeMenuTranscript } from "../../../scripts/jp-menu-text.mjs";
 import {
   isRoutingHold,
   isHoldRequest,
@@ -6,11 +7,7 @@ import {
   isHoldReturn,
 } from "../../../scripts/jp-backchannel.mjs";
 export const menuText = (text) =>
-  text
-    .normalize("NFKC")
-    .replace(/[一二三四五六七八九〇]/g, (c) =>
-      String("〇一二三四五六七八九".indexOf(c)),
-    )
+  normalizeMenuTranscript(text)
     .replace(/[。、,.\s]/g, "")
     .toLowerCase();
 const ivr =
@@ -32,11 +29,7 @@ export function progressEvidence(baseline, transcript, seen = []) {
   if (
     ivr.test(transcript) &&
     /[0-9*#](?:番)?(?:を|に|です|[、,]|\s)/.test(
-      transcript
-        .normalize("NFKC")
-        .replace(/[一二三四五六七八九〇]/g, (c) =>
-          String("〇一二三四五六七八九".indexOf(c)),
-        ),
+      normalizeMenuTranscript(transcript),
     )
   ) {
     // Reject partial/repeated announcements with minor ASR variation.

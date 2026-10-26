@@ -9,13 +9,9 @@ import {
   isRoutingHold,
 } from "./jp-backchannel.mjs";
 import { PlaybackClock } from "./jp-playback-clock.mjs";
+import { normalizeMenuTranscript } from "./jp-menu-text.mjs";
 const digest = (text) => createHash("sha256").update(text).digest("hex");
-const normalize = (text) =>
-  text
-    .normalize("NFKC")
-    .replace(/[一二三四五六七八九〇]/g, (c) =>
-      String("〇一二三四五六七八九".indexOf(c)),
-    );
+const normalize = normalizeMenuTranscript;
 const terminal = new Set([
   "confirmed",
   "refused",

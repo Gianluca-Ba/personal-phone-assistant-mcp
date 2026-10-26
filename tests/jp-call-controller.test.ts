@@ -84,6 +84,44 @@ it("binds an advertised digit to a completed current menu and consumes its token
   ).toBe("STALE_OR_INCOMPLETE_MENU");
   expect(h.digits).toEqual(["2"]);
 });
+it("recognizes the observed kana ni without inventing a missing menu option or bypassing sensitive menus", async () => {
+  const h = harness();
+  h.menu("次の四つの中からご希望の番号を選択してください。");
+  for (const s of [
+    "営業時間は一を",
+    "アップルケアに転送するには ニを",
+    "法人は三を",
+    "その他のご質問は五を押してください。",
+  ])
+    h.menu(s);
+  const snapshot = await h.c.command("read-kana", "read_current_menu", {});
+  expect(snapshot.advertised_digits).toEqual(["1", "2", "3", "5"]);
+  expect(
+    (
+      await h.c.command("select-kana", "press_ivr_digit", {
+        digits: "5",
+        menu_token: snapshot.menu_token,
+      })
+    ).ok,
+  ).toBe(true);
+  expect(h.digits).toEqual(["5"]);
+  const sensitive = harness();
+  sensitive.menu("暗証番号は ニを押してください。");
+  const state = await sensitive.c.command(
+    "read-sensitive",
+    "read_current_menu",
+    {},
+  );
+  expect(
+    (
+      await sensitive.c.command("select-sensitive", "press_ivr_digit", {
+        digits: "2",
+        menu_token: state.menu_token,
+      })
+    ).reason,
+  ).toBe("SENSITIVE_MENU");
+  expect(sensitive.digits).toEqual([]);
+});
 it("retains verified dispatch evidence when a new menu arrives during the provider request", async () => {
   let op: any, done: any;
   const h = harness((_digit: string, operation: any) => {
