@@ -63,6 +63,7 @@ export class VoiceBridge {
   async register(body) {
     dtmfTuning(this.env); // Validate supported limits before returning any dial contract.
     this.speechLimit();
+    this.recognitionModel();
     const existing = await this.load();
     const row = await this.env.DB.prepare(
       "SELECT * FROM outbound_requests WHERE id = ?",
@@ -472,7 +473,7 @@ export class VoiceBridge {
               : {}),
             transcript_source:
               this.env.EXTERNAL_STT === "true"
-                ? "external_stt_flux_multi"
+                ? "external_stt_" + this.recognitionModel().replaceAll("-", "_")
                 : "voice_assistant",
           },
         }),
@@ -605,14 +606,17 @@ export class VoiceBridge {
     if (this.stt) return;
     const query = new URLSearchParams({
       transcription_engine: "Deepgram",
-      model: "flux-multi",
+      model: this.recognitionModel(),
       input_format: "mulaw",
       sample_rate: "8000",
       language: "ja",
       interim_results: "true",
-      eot_threshold: "0.8",
-      eot_timeout_ms: "2000",
     });
+    // These parameters are documented only for Flux and rejected by Nova-3.
+    if (this.recognitionModel() === "flux-multi") {
+      query.set("eot_threshold", "0.8");
+      query.set("eot_timeout_ms", "2000");
+    }
     const r = await fetchSocketUpgrade(
       this.providerFetch,
       "https://api.telnyx.com/v2/speech-to-text/transcription?" + query,
@@ -699,6 +703,12 @@ export class VoiceBridge {
     if (!Number.isFinite(seconds) || seconds < 3 || seconds > 20)
       throw Error("Invalid spoken response limit");
     return seconds;
+  }
+  recognitionModel() {
+    const model = this.env.OUTBOUND_STT_MODEL ?? "nova-3";
+    if (!["nova-3", "flux-multi"].includes(model))
+      throw Error("Unsupported outbound recognition model");
+    return model;
   }
   modelMustRemainSilent() {
     return !!(

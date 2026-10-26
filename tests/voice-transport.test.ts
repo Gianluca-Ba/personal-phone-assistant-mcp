@@ -225,6 +225,40 @@ it("requires server authentication before any registration or unsigned webhook r
     ).status,
   ).toBe(403);
 });
+it("opens verified Japanese Nova-3 recognition without unsupported Flux parameters and retains an explicit rollback model", async () => {
+  const f = fixture();
+  await f.register();
+  await f.b.openStt();
+  const url = new URL(
+    f.network.find((n: any) => n.url.includes("/speech-to-text/")).url,
+  );
+  expect(url.searchParams.get("model")).toBe("nova-3");
+  expect(url.searchParams.get("language")).toBe("ja");
+  expect(url.searchParams.has("eot_threshold")).toBe(false);
+  expect(url.searchParams.has("eot_timeout_ms")).toBe(false);
+  expect(
+    (
+      await (
+        await worker.fetch(new Request("https://voice.example/health"), f.env)
+      ).json()
+    ).recognition_model,
+  ).toBe("nova-3");
+  const g = fixture();
+  g.env.OUTBOUND_STT_MODEL = "flux-multi";
+  await g.register();
+  await g.b.openStt();
+  const previous = new URL(
+    g.network.find((n: any) => n.url.includes("/speech-to-text/")).url,
+  );
+  expect(previous.searchParams.get("model")).toBe("flux-multi");
+  expect(previous.searchParams.get("eot_timeout_ms")).toBe("2000");
+  const bad = fixture();
+  bad.env.OUTBOUND_STT_MODEL = "unverified-model";
+  await expect(bad.register()).rejects.toThrow(
+    "Unsupported outbound recognition model",
+  );
+  expect(bad.network).toEqual([]);
+});
 it("roundtrips telephony PCM in 20ms mu-law frames without dropping partial codec groups", () => {
   for (const rate of [8000, 16000, 24000]) {
     const samples = rate / 10,
@@ -1176,6 +1210,27 @@ it("keeps post-DTMF audio silent and a routing hold bounded through continuous m
   expect(f.b.controller.hold).toBeNull();
   expect(f.b.context.ivr_progress.state).toBe("dialogue_candidate");
   await f.generate("actual-question", "予約なしで購入できますか。");
+  expect(f.media.frames.some((m: any) => m.event === "media")).toBe(true);
+});
+it("releases the routing hold for the recorded Japanese question instead of remaining silent until remote hangup", async () => {
+  const f = await dialogueFixture();
+  f.b.context.ivr_progress = {
+    state: "awaiting_transition",
+    command_id: "operator-question",
+    baseline: "その他のご質問は五を押してください。",
+  };
+  f.b.observeRoutingInterim("お電話を転送しております。");
+  expect(f.b.controller.hold).not.toBeNull();
+  f.b.turns.accept({
+    type: "transcript",
+    transcript: "ございますでしょうか?",
+    confidence: 0.99,
+    is_final: true,
+    speech_final: true,
+  });
+  expect(f.b.controller.hold).toBeNull();
+  expect(f.b.context.ivr_progress.state).toBe("dialogue_candidate");
+  await f.generate("operator-response", "もしもし。予約なしで購入できますか。");
   expect(f.media.frames.some((m: any) => m.event === "media")).toBe(true);
 });
 it("never treats a conditional menu label as a routing hold, and repeated transfer observations do not renew the lease", async () => {

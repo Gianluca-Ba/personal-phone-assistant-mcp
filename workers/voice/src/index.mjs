@@ -12,6 +12,7 @@ const ready = (env) =>
   env.PREWARM_BEFORE_DIAL === "true" &&
   env.EXTERNAL_STT === "true" &&
   env.CONTROLLED_FAREWELL === "true" &&
+  ["nova-3", "flux-multi"].includes(env.OUTBOUND_STT_MODEL ?? "nova-3") &&
   [
     "VOICE_CONTROL_API_SECRET",
     "TELNYX_API_KEY",
@@ -32,6 +33,7 @@ export default {
         ready: ready(env),
         pstn_pilot_verified: env.PSTN_PILOT_VERIFIED === "true",
         spoken_output_policy: "validated-utterance-v2",
+        recognition_model: env.OUTBOUND_STT_MODEL ?? "nova-3",
       });
     if (
       url.pathname === "/diagnostics/preflight" &&

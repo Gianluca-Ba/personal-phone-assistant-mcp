@@ -44,6 +44,20 @@ it("does not release a routing hold for an announcement that asks the caller to 
       "human_greeting_candidate",
     );
 });
+it("recognizes the observed post-transfer audibility question as a dialogue candidate, never task success", () => {
+  for (const text of [
+    "お声届いておりますでしょうか。",
+    "ございますでしょうか?",
+    "Non so se ますでしょうか。",
+  ])
+    expect(progressEvidence(baseline, text)).toMatchObject({
+      kind: "human_greeting_candidate",
+    });
+  for (const text of ["ご視聴ありがとうございました", "उसमें से", "Posso"])
+    expect(progressEvidence(baseline, text)?.kind).not.toBe(
+      "human_greeting_candidate",
+    );
+});
 it("recognizes the observed ongoing transfer without confusing conditional or quoted menu labels", () => {
   for (const text of [
     "お電話を転送しております。",
