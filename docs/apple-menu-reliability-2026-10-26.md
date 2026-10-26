@@ -29,3 +29,5 @@ The following Marunouchi call exposed another segmentation boundary: the first c
 An initial parallel REST retranscription request returned HTTP 429; it was not interpreted as an audio or phone failure and was not repeatedly retried. Later single-request recording analysis succeeded. Live calls retain the unchanged quota and carrier time limits.
 
 The committed-fragment refinement passed 228/228 tests, type checking, the unchanged 24+29 phone-contract checks, all 11 workerd checks and builds before publication. The original single-use/expiry, sensitive-choice, concurrent command and unknown-delivery regressions remain in that suite.
+
+The final gate also discards old advertised digits whenever an unmatching completed menu arrives inside the short transcript merge interval. It preserves an exact replay; it never carries choices from that snapshot into a new menu. The added 100 ms transition fixture and the full 229/229 suite passed, along with type checking and the final production dry run.

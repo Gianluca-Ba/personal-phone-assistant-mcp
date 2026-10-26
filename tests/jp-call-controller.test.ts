@@ -788,6 +788,37 @@ it("revokes a segmented replay for unknown speech, changed choices and original 
   ).toBe(false);
   expect(h.digits).toEqual([]);
 });
+it("never carries old advertised digits into a different menu arriving within the merge interval", async () => {
+  const h = harness();
+  const final = (transcript: string) => {
+    h.c.event({ type: "input_audio_buffer.speech_started" });
+    h.c.event({ type: "input_audio_buffer.speech_stopped" });
+    h.c.event({
+      type: "conversation.item.input_audio_transcription.completed",
+      transcript,
+    });
+  };
+  final(appleIntro + appleChoices);
+  h.advance(800);
+  const old = await h.c.command("old-menu", "read_current_menu", {});
+  // A new menu may follow a replay fragment immediately, without a long gap.
+  final("次の四つの中から");
+  h.advance(100);
+  final("予約の変更は二を押してください。");
+  h.advance(800);
+  const current = await h.c.command("new-menu", "read_current_menu", {});
+  expect(current.advertised_digits).toEqual(["2"]);
+  expect(current.menu).not.toContain("その他のご質問");
+  expect(
+    (
+      await h.c.command("old-selection", "press_ivr_digit", {
+        digits: "5",
+        menu_token: old.menu_token,
+      })
+    ).ok,
+  ).toBe(false);
+  expect(h.digits).toEqual([]);
+});
 it("never retargets a queued selection when a human or a different menu intervenes", async () => {
   for (const text of [
     "はい、担当者です。ご用件は何でしょうか。",

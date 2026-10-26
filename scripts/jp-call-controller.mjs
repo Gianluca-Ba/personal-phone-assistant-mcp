@@ -341,6 +341,8 @@ export class CallController {
         this.menuAssembly = null;
         if (
           assembly ||
+          interruptedMenu ||
+          this.menu?.complete ||
           this.lastTranscript === null ||
           at - this.lastTranscript > 750
         )
