@@ -31,7 +31,7 @@ ChatGPT prepara la richiesta, presenta numero, lingua, obiettivo e istruzioni co
 
 ## Controlli persistenti
 
-- Richieste con snapshot immutabile legato a proprietario e client OAuth; scadenza server di 10 minuti senza rinnovo sui retry.
+- Richieste con snapshot immutabile legato a proprietario e client OAuth; scadenza server di 30 minuti nella configurazione pubblicata (`OUTBOUND_APPROVAL_TTL_MINUTES`, intervallo 5–30, default 10 se assente). Nessun rinnovo sui retry o sulle richieste esistenti.
 - UUID univoci, nonce e digest dei dettagli. La stessa chiave con dati differenti viene rifiutata.
 - Policy esplicita `OUTBOUND_DESTINATION_POLICY=all_standard`: numeri E.164 validi di categoria standard, con blocchi configurabili. La modalità `allowlist` resta disponibile. [Regole e limiti del Worker telefonico](docs/outbound-destinations.md).
 - Rate limit persistente per proprietario, condiviso fra client e richieste: `OUTBOUND_RATE_LIMIT_PER_HOUR` (default 5, intervallo 1–100) per creazione e approvazione.

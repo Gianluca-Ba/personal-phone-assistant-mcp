@@ -43,6 +43,13 @@ if (
     "Execution requires the explicit conversation-policy-v1 operational policy.",
   );
 const policy = mcp.vars.OUTBOUND_DESTINATION_POLICY ?? "allowlist";
+const approvalTtl = mcp.vars.OUTBOUND_APPROVAL_TTL_MINUTES ?? "10";
+if (
+  !/^[0-9]+$/.test(approvalTtl) ||
+  Number(approvalTtl) < 5 ||
+  Number(approvalTtl) > 30
+)
+  fail("Approval TTL must be an integer between 5 and 30 minutes.");
 if (!["allowlist", "all_standard"].includes(policy))
   fail("Unknown outbound destination policy.");
 if (mcp.vars.OUTBOUND_ENABLED === "true") {

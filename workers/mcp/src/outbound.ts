@@ -66,6 +66,7 @@ export interface OutboundEnv extends DestinationEnv {
   OUTBOUND_API_SECRET?: string;
   OUTBOUND_APPROVAL_SECRET?: string;
   OUTBOUND_RATE_LIMIT_PER_HOUR?: string;
+  OUTBOUND_APPROVAL_TTL_MINUTES?: string;
 }
 export type Snapshot = z.infer<typeof approveInput> & {
   owner: string;
@@ -81,6 +82,14 @@ export const enabled = (env: OutboundEnv) =>
   env.OUTBOUND_ENABLED === "true" && env.OUTBOUND_CONTRACT_VERIFIED === "true";
 function fail(code: string): never {
   throw new Error(code);
+}
+function approvalTtl(env: OutboundEnv): number {
+  const value = env.OUTBOUND_APPROVAL_TTL_MINUTES ?? "10";
+  if (!/^[0-9]+$/.test(value)) fail("INVALID_APPROVAL_TTL");
+  const minutes = Number(value);
+  if (!Number.isInteger(minutes) || minutes < 5 || minutes > 30)
+    fail("INVALID_APPROVAL_TTL");
+  return minutes * 60000;
 }
 export class OutboundGate extends DurableObject<OutboundEnv> {
   private authorize(p: Principal, scope: string) {
@@ -129,6 +138,9 @@ export class OutboundGate extends DurableObject<OutboundEnv> {
     const input = createInput.parse(raw);
     this.authorize(p, "calls:write");
     this.configured();
+    // Validate before creating an upstream row. Existing snapshots are never
+    // renewed, even if the configuration changes after their creation.
+    approvalTtl(this.env);
     if (!this.env.OUTBOUND_API_SECRET || !this.allowed(input.destination))
       fail("DESTINATION_OR_CREDENTIAL_DENIED");
     const fingerprint = JSON.stringify({
@@ -235,7 +247,7 @@ export class OutboundGate extends DurableObject<OutboundEnv> {
       return stored;
     }
     const created_at = Date.now(),
-      expires_at = created_at + 600000,
+      expires_at = created_at + approvalTtl(this.env),
       approval_nonce = crypto.randomUUID();
     const canonical = JSON.stringify({
       id: input.id,

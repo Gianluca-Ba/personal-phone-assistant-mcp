@@ -19,6 +19,7 @@ export default {
     const allowed = [
       "create",
       "setCreationTestSecret",
+      "setApprovalTestTtl",
       "setDestinationTestPolicy",
       "register",
       "approve",

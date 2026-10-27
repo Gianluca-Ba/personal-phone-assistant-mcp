@@ -273,6 +273,84 @@ it("rejects expired, changed and non-pending requests without API approval", asy
   );
   expect((await stats()).approve ?? 0).toBe(before.approve ?? 0);
 });
+it("new production snapshots have a bounded 30-minute approval window", async () => {
+  const details = input();
+  const s = (await stub(
+    `create:owner:test-client:${details.request_key}`,
+    "real",
+  ).create(details, actor)) as Snapshot;
+  expect(s.expires_at - s.created_at).toBe(30 * 60000);
+  expect(s.state).toBe("pending_approval");
+});
+it.each([
+  [undefined, 10],
+  ["5", 5],
+  ["30", 30],
+])(
+  "binds TTL %s only when a snapshot is first registered",
+  async (value, minutes) => {
+    const id = crypto.randomUUID(),
+      g = gate(id),
+      details = {
+        id,
+        destination: "+819012345678",
+        language: "ja",
+        instructions: "Test-only pending request",
+      };
+    await env.DB.prepare(
+      "INSERT INTO outbound_requests (id,destination_number,instructions,language,status) VALUES (?,?,?,?,'pending_approval')",
+    )
+      .bind(id, details.destination, details.instructions, details.language)
+      .run();
+    await g.setApprovalTestTtl(value);
+    try {
+      const s = (await g.register(details, actor)) as Snapshot;
+      expect(s.expires_at - s.created_at).toBe(Number(minutes) * 60000);
+      await g.setApprovalTestTtl("30");
+      expect(await g.register(details, actor)).toEqual(s);
+      await g.expireTestRequest();
+      const expired = (await g.register(details, actor)) as Snapshot;
+      expect(expired.expires_at).toBeLessThan(Date.now());
+      expect(expired.approval_nonce).toBe(s.approval_nonce);
+      expect(expired.request_digest).toBe(s.request_digest);
+      const before = await stats();
+      await expect(g.approve(approve(s), actor)).rejects.toThrow(
+        "APPROVAL_EXPIRED",
+      );
+      expect((await stats()).approve ?? 0).toBe(before.approve ?? 0);
+    } finally {
+      await g.setApprovalTestTtl("30");
+    }
+  },
+);
+it.each([
+  "0",
+  "4",
+  "31",
+  "99999999999999999999999",
+  "10.5",
+  "NaN",
+  "",
+  " 30",
+  "1e1",
+])(
+  "rejects invalid approval TTL %s before upstream creation",
+  async (value) => {
+    const details = input(),
+      g = stub(`create:owner:test-client:${details.request_key}`),
+      before = await stats();
+    await g.setApprovalTestTtl(value);
+    try {
+      await expect(g.create(details, actor)).rejects.toThrow(
+        "INVALID_APPROVAL_TTL",
+      );
+      expect((await stats()).create ?? 0).toBe(before.create ?? 0);
+      expect((await stats()).approve ?? 0).toBe(before.approve ?? 0);
+    } finally {
+      await g.setApprovalTestTtl("30");
+    }
+  },
+);
 it("production gate executes one approval under concurrency and rejects replay", async () => {
   const s = await create(),
     g = gate(s.id);

@@ -5,6 +5,9 @@ import {
   type Snapshot,
 } from "../workers/mcp/src/outbound";
 export class OutboundGate extends ProductionGate {
+  async setApprovalTestTtl(value: string | undefined) {
+    this.env.OUTBOUND_APPROVAL_TTL_MINUTES = value;
+  }
   async setCreationTestSecret(secret: string) {
     this.env.OUTBOUND_API_SECRET = secret;
   }

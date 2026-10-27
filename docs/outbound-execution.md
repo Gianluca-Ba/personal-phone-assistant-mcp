@@ -25,7 +25,7 @@ Chiamate inbound, riepiloghi, documenti e altri contenuti esterni restano dati n
 - Identità owner, client OAuth e versione delle credenziali devono coincidere con lo snapshot.
 - Snapshot persistente immutabile: ID, numero, lingua e istruzioni canoniche. Obiettivo e istruzioni vengono uniti prima della creazione.
 - Nonce UUID e digest SHA-256 controllati per corrispondenza esatta. Sono dati visibili al modello e controlli di integrità, **non prove umane**.
-- Scadenza di 10 minuti, senza rinnovo sui retry. Una riga D1 può restare pending dopo la scadenza MCP, ma non è più eseguibile da questo percorso.
+- Scadenza configurata a 30 minuti per le nuove richieste (`OUTBOUND_APPROVAL_TTL_MINUTES`, intero 5–30; default 10 se assente). Il termine esatto è restituito in `expires_at` e incluso nel digest. Retry, nuova registrazione dello stesso ID e aggiornamenti di configurazione non lo rinnovano. Una richiesta già scaduta rimane non eseguibile; per una nuova richiesta serve una nuova conferma esplicita. Una riga D1 può restare pending dopo la scadenza MCP, ma non è più eseguibile da questo percorso.
 - [Policy delle destinazioni](outbound-destinations.md): `all_standard` attiva con validazione e blocchi; modalità `allowlist` ancora disponibile. Il Secret della vecchia allowlist viene ignorato in `all_standard`.
 - Quota persistente per owner e operazione: attualmente 5 creazioni e 5 approvazioni per ora UTC, condivise fra client e richieste. Finestra fissa.
 - D1 letto sul primary per verificare pending e corrispondenza con lo snapshot.
