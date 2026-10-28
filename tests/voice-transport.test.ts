@@ -334,6 +334,10 @@ it("roundtrips telephony PCM in 20ms mu-law frames without dropping partial code
 it("never hangs up before the actual current-stream playback mark, and never dials from the bridge", async () => {
   const f = fixture();
   await f.register();
+  f.b.context.dialogue_candidate_observed = {
+    at: Date.now(),
+    digest: "fixture",
+  };
   const media = new Socket();
   await f.b.attachMedia(media);
   await f.b.bindCall("bound-call");
@@ -438,6 +442,10 @@ it("processes signed-context status webhooks once and preserves the existing pho
 it("preserves queued speech for aizuchi and cancels it for an actual request with local interruption control", async () => {
   const f = fixture();
   await f.register();
+  f.b.context.dialogue_candidate_observed = {
+    at: Date.now(),
+    digest: "fixture",
+  };
   const media = new Socket();
   await f.b.attachMedia(media);
   f.b.voice = new Socket();
@@ -560,6 +568,10 @@ it("hangs up once only after the controlled farewell has actually completed", as
 it("drops late audio from a cancelled response without clearing a newer response", async () => {
   const f = fixture();
   await f.register();
+  f.b.context.dialogue_candidate_observed = {
+    at: Date.now(),
+    digest: "fixture",
+  };
   const media = new Socket();
   await f.b.attachMedia(media);
   await f.b.bindCall("bound-call");
@@ -896,6 +908,12 @@ async function dialogueFixture() {
       },
     },
   });
+  // Generic dialogue fixtures represent an already-established conversation.
+  // Startup/IVR regressions explicitly clear this evidence below.
+  f.b.context.dialogue_candidate_observed = {
+    at: Date.now(),
+    digest: "fixture",
+  };
   const generate = async (id: string, text: string, bytes = 3200) => {
     await f.b.onVoice({ type: "response.created", response: { id } });
     await f.b.onVoice({
@@ -920,6 +938,31 @@ async function dialogueFixture() {
   };
   return { ...f, media, generate, recipient };
 }
+it("blocks initial questions and recorded welcomes until recipient dialogue evidence exists", async () => {
+  const f = await dialogueFixture();
+  f.b.context.dialogue_candidate_observed = null;
+  await f.generate("startup-question", "予約なしで購入できますか。");
+  f.recipient("AppleStore銀座にお電話いただきありがとうございます。");
+  await f.generate("ivr-question", "次回の入荷予定は分かりますか。");
+  expect(f.media.frames.some((m: any) => m.event === "media")).toBe(false);
+  expect(f.b.context.output_audit).toMatchObject({
+    completed_responses: 2,
+    released_responses: 0,
+    blocked_responses: 2,
+    released_pcm_bytes: 0,
+    recipient_reception_proven: false,
+  });
+  f.recipient("もしもし、ご用件をお伺いします。");
+  f.advance(1000);
+  await f.generate("actual-dialogue", "予約なしで購入できますか。");
+  expect(f.media.frames.some((m: any) => m.event === "media")).toBe(true);
+  expect(f.b.context.output_audit.released_responses).toBe(1);
+  await f.b.onVoice({
+    type: "response.done",
+    response: { id: "actual-dialogue", status: "completed" },
+  });
+  expect(f.b.context.output_audit.released_responses).toBe(1);
+});
 it("lets the first validated reply finish through repeated audibility checks, with a fixed nonrenewable grace", async () => {
   const f = await dialogueFixture();
   f.b.context.ivr_progress = { state: "dialogue_candidate", baseline: "" };

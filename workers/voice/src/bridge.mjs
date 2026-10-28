@@ -98,6 +98,8 @@ export class VoiceBridge {
         destination: row.destination_number,
         instructions: row.instructions,
         language: row.language,
+        dialogue_gate_required: true,
+        dialogue_candidate_observed: null,
         fingerprint,
         nonce,
         stream_nonce: streamNonce,
@@ -305,6 +307,7 @@ export class VoiceBridge {
         call_leg_id: this.context.call_leg_id ?? null,
       });
       if (this.context.ivr_progress?.command_id !== id) {
+        this.context.dialogue_candidate_observed = null;
         this.context.ivr_progress = {
           command_id: id,
           state: "awaiting_transition",
@@ -468,6 +471,16 @@ export class VoiceBridge {
             deferred_audibility_checks: String(
               this.context.deferred_audibility_checks ?? 0,
             ),
+            voice_dialogue_gate: JSON.stringify({
+              required: this.context.dialogue_gate_required === true,
+              candidate_observed: !!this.context.dialogue_candidate_observed,
+              human_identity_verified: false,
+            }),
+            ...(this.context.output_audit
+              ? {
+                  voice_output_audit: JSON.stringify(this.context.output_audit),
+                }
+              : {}),
             ...(this.context.ivr_gate
               ? { voice_ivr_gate: JSON.stringify(this.context.ivr_gate) }
               : {}),
@@ -776,6 +789,8 @@ export class VoiceBridge {
   }
   modelMustRemainSilent() {
     return !!(
+      (this.context.dialogue_gate_required === true &&
+        !this.context.dialogue_candidate_observed) ||
       this.controller?.hold ||
       this.context.ivr_progress?.state === "awaiting_transition" ||
       this.routingWait() ||
@@ -1018,6 +1033,12 @@ export class VoiceBridge {
     const holdFiller = this.currentHoldFiller(text);
     const p = this.context.ivr_progress;
     const evidence = p ? progressEvidence(p.baseline, text) : null;
+    const dialogueEvidence = evidence ?? progressEvidence("", text);
+    if (dialogueEvidence?.kind === "human_greeting_candidate")
+      this.context.dialogue_candidate_observed = {
+        at: this.now(),
+        digest: dialogueEvidence.digest,
+      };
     const preserveRoutingHold =
       this.routingWait() &&
       !["human_greeting_candidate", "changed_menu"].includes(evidence?.kind);
@@ -1517,6 +1538,21 @@ export class VoiceBridge {
           no_audio: !response.rendered,
         });
         this.marks.commit(id, response.rendered > 0);
+        // Generated assistant transcripts are not playback evidence. Count only
+        // audio handed to the media transport; this does not prove reception.
+        const audit = (this.context.output_audit ??= {
+          completed_responses: 0,
+          released_responses: 0,
+          blocked_responses: 0,
+          released_pcm_bytes: 0,
+          recipient_reception_proven: false,
+        });
+        audit.completed_responses++;
+        if (response.rendered > 0) {
+          audit.released_responses++;
+          audit.released_pcm_bytes += response.rendered;
+        } else audit.blocked_responses++;
+        this.background(this.persist());
       }
     } else if (
       frame.type === "conversation.item.created" &&
