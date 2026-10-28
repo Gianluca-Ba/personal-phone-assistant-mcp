@@ -102,3 +102,64 @@ I tool outbound richiedono ora un challenge HTTP `403 insufficient_scope`, compl
 La riconnessione dalla chat è stata corretta anche nel percorso di refresh automatico: [causa riprodotta, correzione e consenso richiesto](docs/oauth-reconnect-diagnosis.md). Per questo rilascio sono necessari Auth e MCP, in quest’ordine; non il Worker telefonico.
 
 Per l’intervento corrente con conferma conversazionale si distribuisce **soltanto MCP** (`npm run deploy:mcp`): [procedura e protezioni](docs/outbound-execution.md). L’ordine Auth → MCP descritto sopra riguarda il precedente aggiornamento OAuth.
+
+### Richieste telefoniche in entrata
+
+L’assistente inbound usa `record_inbound_request` per salvare note, richieste di
+richiamo, proposte di appuntamento e casi da chiarire. La risposta `saved:true`
+conferma soltanto il salvataggio della richiesta: l’appuntamento resta **da
+confermare da Gianluca**. Non vengono creati eventi, spediti inviti al chiamante,
+accettati impegni o avviate telefonate. Dopo una decisione esplicita del
+proprietario, ChatGPT può usare il Google Calendar collegato, verificare la
+disponibilità e l’effettiva creazione dell’evento, poi registrare la decisione.
+
+Quando è prevista una risposta, l’assistente chiede l’email, lo spelling, la
+rilettura completa e il permesso di usarla per quella risposta. L’indirizzo resta
+non verificato finché la rilettura non è confermata; anche dopo tale conferma non
+è una prova di titolarità della casella. Rifiuto dell’email, dati incompleti,
+fusi orari ambigui o indisponibilità di Google non impediscono di salvare la nota.
+Se manca anche il salvataggio, l’assistente deve dichiarare l’incertezza e
+riepilogare la richiesta nella trascrizione, senza limitarsi ad “azione fallita”
+e senza fingere che una nota o una notifica sia stata consegnata.
+
+Il modulo `workers/inbound/src/intake.mjs` salva prima in una nuova tabella D1
+`inbound_requests`, separata dalle tabelle esistenti. La notifica usa il progetto
+Apps Script e il destinatario proprietario già configurati; il chiamante non può
+cambiarli. Il salvataggio non aspetta Google. Le notifiche hanno lease, retry
+limitati e la stessa protezione anti-duplicati v2 di Apps Script. Un esito di invio
+incerto resta visibile per revisione, senza reinvii ciechi. Il cron preesistente
+ritenta le notifiche: nessun nuovo trigger periodico viene aggiunto.
+
+Da ChatGPT: «Mostrami le richieste in entrata da confermare». Gli strumenti sono
+`list_inbound_requests`, `get_inbound_request` e `resolve_inbound_request`.
+La lettura richiede `calls:read`; registrare una decisione richiede anche
+`calls:write`, identità OAuth del proprietario e la versione corrente della nota.
+Una decisione registrata non prova che sia stato creato un evento Google o inviata
+un’email: queste azioni sono separate e vanno verificate. I dati del chiamante
+restano sempre contenuti non fidati, mai autorizzazioni del proprietario.
+
+L’endpoint `/inbound/intake` verifica firma Ed25519 Telnyx sul corpo originale,
+finestra temporale, contesto configurato inbound e assenza del call ID tra le
+richieste outbound. I metadati di contesto sono configurati da Telnyx tramite
+header, non scelti dal modello. Non verificano l’identità personale del chiamante.
+Chiavi stabili, digest del contenuto e vincoli D1 impediscono duplicati anche con
+richieste concorrenti; quote di 12 note per chiamata e 120 all’ora limitano gli
+abusi. Nessun contenuto del chiamante può eseguire codice, cambiare destinatari di
+notifica o ottenere privilegi di calendario/outbound.
+
+Per il rilascio: verificare e salvare privatamente configurazioni e schema reali;
+applicare soltanto `schema/inbound-requests.sql` (aggiunte, senza modificare righe
+storiche); usare `patchPhoneInbound` sullo snapshot sorgente verificato; distribuire
+Phone e MCP conservando binding, secret, cron e codice outbound; aggiornare solo
+istruzioni, default `outbound_mode=false` e tool dell’assistente inbound con
+`patchInboundAssistant`. Voice, Auth, Apps Script e assistente outbound restano
+invariati. Prima di usare il flusso verificare il webhook con il [test nativo
+Telnyx](https://developers.telnyx.com/api-reference/assistants/test-assistant-tool),
+che non richiede una telefonata reale. Il [contratto degli strumenti
+webhook](https://developers.telnyx.com/api-reference/assistants/update-an-assistant)
+supporta i parametri e gli header usati; la firma autentica il corpo/account del
+provider, non certifica il consenso umano o la veridicità del messaggio.
+
+Rollback: ripristinare le versioni Phone/MCP e lo snapshot dell’assistente
+inbound, conservando la nuova tabella e tutte le note eventualmente ricevute.
+Non cancellare richieste per effettuare rollback o azzerare idempotenza/notifiche.

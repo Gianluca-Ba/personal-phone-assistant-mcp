@@ -1,7 +1,8 @@
 import { insufficientScope } from "@cloudflare/workers-oauth-provider";
 // Scope discovery is a read-only preflight. It must run before MCP dispatch/side effects.
 export function requiredToolScopes(name: unknown): string[] {
-  if (name === "create_outbound_request") return ["calls:read", "calls:write"];
+  if (name === "create_outbound_request" || name === "resolve_inbound_request")
+    return ["calls:read", "calls:write"];
   if (name === "approve_outbound_request")
     return ["calls:read", "calls:execute"];
   return ["calls:read"];

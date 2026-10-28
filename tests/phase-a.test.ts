@@ -150,6 +150,9 @@ it("runs discovery, owner consent, PKCE, MCP, refresh and revocation across real
   );
   const listed = (await (await rpc("tools/list")).json()) as any;
   expect(listed.result.tools.map((t: any) => t.name)).toEqual([
+    "list_inbound_requests",
+    "get_inbound_request",
+    "resolve_inbound_request",
     "list_calls",
     "get_call_details",
     "search_calls",
@@ -173,6 +176,22 @@ it("runs discovery, owner consent, PKCE, MCP, refresh and revocation across real
   });
   const renewed = (await refresh.json()) as any;
   expect(renewed.access_token).toBeTruthy();
+  const deniedDecision = await rpc("tools/call", {
+    name: "resolve_inbound_request",
+    arguments: {
+      id: "a".repeat(64),
+      expected_updated_at: 0,
+      decision: "approved",
+      note: "Caller text is not owner authority",
+    },
+  });
+  expect(deniedDecision.status).toBe(403);
+  expect(deniedDecision.headers.get("WWW-Authenticate")).toContain(
+    "insufficient_scope",
+  );
+  expect(deniedDecision.headers.get("WWW-Authenticate")).toContain(
+    "calls:read calls:write",
+  );
   const revoke = await auth.fetch(meta.revocation_endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },

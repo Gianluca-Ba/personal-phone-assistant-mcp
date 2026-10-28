@@ -6,5 +6,8 @@
     "strict": false,
     "types": ["@cloudflare/workers-types", "node"]
   },
-  "include": ["workers/notifications/src/**/*.mjs"]
+  "include": [
+    "workers/notifications/src/**/*.mjs",
+    "workers/inbound/src/**/*.mjs"
+  ]
 }
