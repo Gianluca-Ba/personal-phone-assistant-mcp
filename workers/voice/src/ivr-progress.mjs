@@ -12,6 +12,13 @@ export const menuText = (text) =>
     .toLowerCase();
 const ivr =
   /押してください|選択してください|入力してください|お選びください|\bpress\b|\bdial\b/i;
+// Short direct-pickup introductions, including the observed ASR greeting.
+// A named pickup is only a dialogue candidate, never verified human identity.
+// Recorded "thank you for calling <store>" welcomes remain excluded below.
+const directPickup = (s) =>
+  /^(?:はい[、,\s]*)?(?:お電話(?:を)?ありがとうございます|おやっとうございます)[、,\s]+[^。！？「」『』“”"]{1,30}(?:です|でございます)[。.!！\s]*$/.test(
+    s.trim(),
+  );
 export function progressEvidence(baseline, transcript, seen = []) {
   const text = menuText(transcript),
     old = menuText(baseline);
@@ -61,7 +68,8 @@ export function progressEvidence(baseline, transcript, seen = []) {
     !/[「」『』“”"]/.test(transcript) &&
     !isHoldRequest(transcript) &&
     !isHoldFiller(transcript) &&
-    (isHoldReturn(transcript) ||
+    (directPickup(transcript) ||
+      isHoldReturn(transcript) ||
       /お待たせ(?:いた)?しました|担当の.{1,12}(?:です|でございます)|ご用件(?:を|は)|どのような|もしもし|お名前|お声.{0,12}届|聞こえ|確認(?:できました|が取れました)|(?:アップル|Apple)(?:ストア)?[、,\s]*川崎(?:店)?(?:の|[、,\s])[^。！？]{1,20}(?:です|でございます)|how (?:may|can) I help|thank you for (?:holding|waiting)/i.test(
         transcript,
       ) ||

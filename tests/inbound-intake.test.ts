@@ -201,12 +201,15 @@ it("enforces per-call quota atomically while retaining already-saved data", asyn
   expect(rs.filter((r) => r.reason === "INTAKE_LIMIT_REACHED")).toHaveLength(
     18,
   );
+  // Hashing is async: any twelve requests may win the quota race. Retry an
+  // actual winner, rather than assuming the first input completed first.
+  const savedIndex = rs.findIndex((r) => r.saved);
   expect(
     (
       await saveIntake(
         f.db,
         "call",
-        input({ request_key: "key0", message: "note 0" }),
+        input({ request_key: "key" + savedIndex, message: "note " + savedIndex }),
         101,
       )
     ).saved,

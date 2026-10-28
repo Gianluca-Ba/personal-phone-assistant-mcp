@@ -26,6 +26,7 @@
     "OUTBOUND_DTMF_DURATION_MS": "250",
     "OUTBOUND_IVR_TRANSITION_TIMEOUT_MS": "45000",
     "OUTBOUND_MAX_UTTERANCE_SECONDS": "12",
+    "OUTBOUND_INITIAL_ACK": "true",
     "PSTN_PILOT_VERIFIED": "false",
     "VOICE_ORIGIN": "https://personal-phone-assistant-voice.barsaglini-gianluca.workers.dev",
     "OUTBOUND_ASSISTANT_ID": "",

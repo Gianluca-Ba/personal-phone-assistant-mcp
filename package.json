@@ -24,7 +24,8 @@
     "test:voice-timings": "node scripts/offline-ivr-timing-sweep.mjs",
     "test:voice-handoff": "node scripts/offline-voice-handoff-sweep.mjs",
     "build:notifications": "esbuild workers/notifications/src/provider.mjs --bundle --format=esm --platform=browser --outfile=.wrangler/summary-build.mjs",
-    "build:inbound": "esbuild workers/inbound/src/intake.mjs --bundle --format=esm --platform=browser --outfile=.wrangler/inbound-build.mjs"
+    "build:inbound": "esbuild workers/inbound/src/intake.mjs --bundle --format=esm --platform=browser --outfile=.wrangler/inbound-build.mjs",
+    "test:voice-pickup": "node scripts/offline-pickup-sweep.mjs"
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "1.2.4",

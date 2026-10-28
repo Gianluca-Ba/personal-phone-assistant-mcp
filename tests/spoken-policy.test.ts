@@ -124,3 +124,13 @@ it("keeps one question per spoken turn and does not misrepresent automation", ()
   expect(speechViolation("自動音声の電話アシスタントです。")).toBeNull();
   expect(speechViolation("担当者の方とお話しできますか。")).toBeNull();
 });
+it("replaces the model's first acknowledgement rule when the system owns pickup, preserving the task snapshot", () => {
+  const task = "Booking for two at exactly 18:45, no payment.";
+  const p = composeOutboundTask(task, { systemInitialAck: true });
+  expect(p).not.toContain(
+    "make the FIRST reply a single very short acknowledgement",
+  );
+  expect(p).toContain("first ask 予約をお願いできますか。");
+  expect(p).toContain("do not bundle date, time, party size, name");
+  expect(p).toContain(JSON.stringify({ authorized_task: task }));
+});

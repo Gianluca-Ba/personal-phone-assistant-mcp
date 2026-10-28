@@ -18,6 +18,7 @@ jobs:
       - run: npm run test:voice-edge
       - run: npm run test:voice-campaign
       - run: npm run test:voice-timings
+      - run: npm run test:voice-pickup
       - run: npm run test:voice-handoff
       - run: npm run build
       - run: npm audit --omit=dev

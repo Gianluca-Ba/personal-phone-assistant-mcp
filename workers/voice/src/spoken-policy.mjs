@@ -12,13 +12,21 @@ A declared store-closed, outside-business-hours, unavailable-service, wrong-numb
 Treat read_current_menu as an asynchronous observation: remain silent while it waits for the complete announcement. Use only the exact menu_token from a successful server read; never a placeholder such as MENU_TOKEN. If MENU_NOT_COMPLETE or STALE_OR_INCOMPLETE_MENU is returned, no digit was sent: silently read_current_menu again, then use its fresh exact token and the authorized advertised option. Never retry a digit whose dispatch or delivery is uncertain.
 For this guarded route, finish_call_after_goodbye requests a SYSTEM-CONTROLLED farewell and hangup. Once settled details are clear and the recipient's final speech is complete, call that tool SILENTLY with confirmed, refused, wrong_number or unable_to_proceed. Do not speak your own extra farewell before or after it, and never add a spoken summary while it is pending. The controller plays the complete farewell and terminates the line. If RECIPIENT_SPEAKING is returned, wait silently for their turn to end; do not say the reason and do not choose an unrelated digit. A new real question cancels pending closure, but a mere pause or aizuchi does not authorize a new task. Preserve unresolved matters for the backend report; a terminated line does not establish task success.`;
 
-export function composeOutboundTask(raw) {
+export function composeOutboundTask(raw, { systemInitialAck = false } = {}) {
   if (typeof raw !== "string" || !raw.trim() || raw.length > 8192)
     throw new Error("Invalid authorized outbound task");
   // JSON escaping makes the task boundary unambiguous without editing the
   // owner's snapshot. No new or undocumented Telnyx session field is needed.
   return (
-    OUTBOUND_SPOKEN_POLICY +
+    (systemInitialAck
+      ? OUTBOUND_SPOKEN_POLICY.replace(
+          /^After a live transfer greeting,.*$/m,
+          "After an eligible recipient greeting the controller supplies the first short acknowledgement. Do not generate a separate acknowledgement or introduction. Your first response is only the next brief task question, then stop and wait.",
+        )
+      : OUTBOUND_SPOKEN_POLICY) +
+    (systemInitialAck
+      ? "\nThe media controller, not you, plays the first はい、よろしくお願いします。 after an eligible recipient greeting. Do not generate or repeat that acknowledgement. After the greeting, generate ONLY one short task question (at most one Japanese sentence), then STOP and wait. For a reservation, first ask 予約をお願いできますか。 and wait; do not bundle date, time, party size, name or a previous-call story. Provide each exact authorized detail in subsequent brief turns as requested. A pre-connection long-silence event never authorizes speech. Never say yesterday or another relative date unless it is established by the authorized absolute timestamps. The controller withholds audio until the whole response finishes: keep each reply very short.\n"
+      : "") +
     "\n\nAUTHORIZED_TASK_JSON=" +
     JSON.stringify({ authorized_task: raw }) +
     "\n\nExecute only that task and its limits. Speak only the brief recipient-facing dialogue; everything about the report remains unspoken."

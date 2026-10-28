@@ -33,6 +33,8 @@ export default {
         ready: ready(env),
         pstn_pilot_verified: env.PSTN_PILOT_VERIFIED === "true",
         spoken_output_policy: "validated-utterance-v2",
+        pickup_acknowledgement:
+          env.OUTBOUND_INITIAL_ACK === "true" ? "fixed-system-once" : "model",
         recognition_model: env.OUTBOUND_STT_MODEL ?? "nova-3",
       });
     if (

@@ -2088,3 +2088,200 @@ it("keeps an ongoing wait apology silent through interim/final STT but hears the
   expect(f.media.frames.some((m: any) => m.event === "media")).toBe(true);
   expect(f.network.some((n: any) => n.url.endsWith("/hangup"))).toBe(false);
 });
+
+async function initialAckFixture() {
+  const f = await dialogueFixture();
+  f.env.OUTBOUND_INITIAL_ACK = "true";
+  f.b.context.dialogue_candidate_observed = null;
+  f.b.context.answered_at = new Date(f.advance(0)).toISOString();
+  return f;
+}
+function ackCompletion(
+  f: any,
+  state = f.b.context.initial_ack.state,
+  status = "completed",
+) {
+  return f.b.onWebhook({
+    id: crypto.randomUUID(),
+    event_type: "call.speak.ended",
+    occurred_at: new Date(f.advance(0)).toISOString(),
+    payload: {
+      connection_id: f.env.VOICE_APP_ID,
+      call_control_id: "bound-call",
+      client_state: state,
+      status,
+    },
+  });
+}
+it.each([
+  "お電話ありがとうございます、すらる手です。",
+  "おやっとうございます、らるてです。",
+  "もしもし、ご用件をお伺いします。",
+])(
+  "acknowledges direct pickup once without waiting for the generated booking request: %s",
+  async (greeting) => {
+    const f = await initialAckFixture();
+    // The pre-answer long-silence greeting must not consume the audible greeting.
+    await f.generate("prewarm", "はい、よろしくお願いします。");
+    f.recipient(greeting);
+    f.advance(400);
+    await f.b.checkDialogue();
+    const speaks = () => f.network.filter((n: any) => n.url.endsWith("/speak"));
+    expect(speaks()).toHaveLength(1);
+    expect(speaks()[0].body.payload).toBe("はい、よろしくお願いします。");
+    expect(
+      f.b.context.initial_ack.requested_at -
+        f.b.context.dialogue_candidate_observed.at,
+    ).toBe(400);
+    // Task audio is still validated as a whole and never overlaps the fixed ack.
+    await f.generate("task", "予約をお願いできますか。");
+    expect(f.media.frames.filter((m: any) => m.event === "media")).toHaveLength(
+      0,
+    );
+    f.advance(3000);
+    await f.b.checkDialogue();
+    expect(f.media.frames.filter((m: any) => m.event === "media")).toHaveLength(
+      0,
+    );
+    await ackCompletion(f);
+    expect(f.media.frames.filter((m: any) => m.event === "media")).toHaveLength(
+      10,
+    );
+    await ackCompletion(f);
+    await f.b.checkDialogue();
+    expect(speaks()).toHaveLength(1);
+    expect(f.media.frames.filter((m: any) => m.event === "media")).toHaveLength(
+      10,
+    );
+  },
+);
+it.each([
+  "AppleStore銀座にお電話いただきありがとうございます。",
+  "その他のご質問は五を押してください。",
+  "ただいまお電話を転送しております。",
+  "確認しますので少々お待ちください。",
+  "本日の営業は終了しました。",
+])(
+  "never plays the initial acknowledgement to recorded welcome, IVR, hold or terminal speech: %s",
+  async (text) => {
+    const f = await initialAckFixture();
+    f.recipient(text);
+    f.advance(400);
+    await f.b.checkDialogue();
+    expect(f.b.context.initial_ack).toBeUndefined();
+    expect(
+      f.network
+        .filter((n: any) => n.url.endsWith("/speak"))
+        .some((n: any) => n.body.payload === "はい、よろしくお願いします。"),
+    ).toBe(false);
+  },
+);
+it("retains the acoustic guard and rejects premature or unauthenticated acknowledgement completion", async () => {
+  const f = await initialAckFixture();
+  f.recipient("もしもし、ご用件をお伺いします。");
+  f.b.activity = { active: true };
+  await f.b.checkDialogue();
+  expect(f.b.context.initial_ack).toBeUndefined();
+  f.advance(400);
+  f.b.activity.active = false;
+  await f.b.checkDialogue();
+  const state = JSON.parse(
+    Buffer.from(f.b.context.initial_ack.state, "base64").toString(),
+  );
+  const foreign = Buffer.from(
+    JSON.stringify({ ...state, nonce: crypto.randomUUID() }),
+  ).toString("base64");
+  expect((await ackCompletion(f, foreign)).status).toBe(403);
+  await ackCompletion(
+    f,
+    Buffer.from(
+      JSON.stringify({ ...state, token: crypto.randomUUID() }),
+    ).toString("base64"),
+  );
+  await ackCompletion(f, undefined, "failed");
+  expect(f.b.context.initial_ack.completed_at).toBeNull();
+  expect(f.b.initialAckPending()).toBe(true);
+});
+it("cancels an initial acknowledgement for a real correction, never replays it, and discards stale task audio", async () => {
+  const f = await initialAckFixture();
+  f.recipient("もしもし、ご用件をお伺いします。");
+  f.advance(400);
+  await f.b.checkDialogue();
+  await f.generate("pending-task", "予約をお願いできますか。");
+  f.recipient("違います。少々お待ちください。");
+  await f.b.checkDialogue();
+  expect(f.b.context.initial_ack.cancelled).toBe(true);
+  await ackCompletion(f);
+  expect(f.b.context.initial_ack.completed_at).toBeNull();
+  expect(f.media.frames.some((m: any) => m.event === "media")).toBe(false);
+  f.recipient("お待たせしました。");
+  f.advance(400);
+  await f.b.checkDialogue();
+  expect(
+    f.network.filter(
+      (n: any) =>
+        n.url.endsWith("/speak") &&
+        n.body.payload === "はい、よろしくお願いします。",
+    ),
+  ).toHaveLength(1);
+});
+it("does not duplicate a model acknowledgement and never releases unchecked or incomplete booking audio", async () => {
+  const f = await initialAckFixture();
+  f.recipient("もしもし、ご用件をお伺いします。");
+  f.advance(400);
+  await f.b.checkDialogue();
+  await f.generate("duplicate-ack", "はい、よろしくお願いします。");
+  await ackCompletion(f);
+  expect(f.media.frames.some((m: any) => m.event === "media")).toBe(false);
+  await f.b.onVoice({
+    type: "response.created",
+    response: { id: "unfinished" },
+  });
+  await f.b.onVoice({
+    type: "response.output_audio.delta",
+    response_id: "unfinished",
+    delta: Buffer.alloc(3200).toString("base64"),
+  });
+  f.b.ended = true;
+  f.b.cleanup();
+  expect(f.b.context.output_audit.unfinished_responses).toBe(1);
+  expect(f.b.context.output_audit.released_pcm_bytes).toBe(0);
+  expect(f.b.context.response_audit.at(-1)).toMatchObject({
+    generated_pcm_bytes: 3200,
+    released_pcm_bytes: 0,
+    reason: "call_ended_before_response_done",
+    completed_at: null,
+  });
+});
+it("bounds missing acknowledgement callbacks without retrying or releasing queued task speech", async () => {
+  const f = await initialAckFixture();
+  f.recipient("もしもし、ご用件をお伺いします。");
+  f.advance(400);
+  await f.b.checkDialogue();
+  await f.generate("queued", "予約をお願いできますか。");
+  f.advance(10000);
+  await f.b.checkDialogue();
+  expect(f.b.context.stop_reason).toBe("initial_ack_playback_unconfirmed");
+  expect(f.b.context.initial_ack.cancelled).toBe(true);
+  expect(f.media.frames.some((m: any) => m.event === "media")).toBe(false);
+  expect(
+    f.network.filter(
+      (n: any) =>
+        n.url.endsWith("/speak") &&
+        n.body.payload === "はい、よろしくお願いします。",
+    ),
+  ).toHaveLength(1);
+});
+it("permits a later genuine audibility answer after the system acknowledgement", async () => {
+  const f = await initialAckFixture();
+  f.recipient("もしもし、ご用件をお伺いします。");
+  f.advance(400);
+  await f.b.checkDialogue();
+  await f.generate("first-task", "予約をお願いできますか。");
+  await ackCompletion(f);
+  f.advance(1000);
+  for (const mark of [...f.b.marks.pending.keys()]) f.b.marks.acknowledge(mark);
+  f.recipient("お声は届いていますか？");
+  await f.generate("later-answer", "はい、聞こえています。");
+  expect(f.b.responses.get("later-answer").rendered).toBe(3200);
+});
