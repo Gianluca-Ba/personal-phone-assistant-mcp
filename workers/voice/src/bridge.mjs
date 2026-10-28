@@ -626,13 +626,17 @@ export class VoiceBridge {
   systemVoiceAction(action, body, operation, permitted = () => !this.ended) {
     // Serialize fixed speech and stop commands so a late stop for an old
     // farewell cannot overtake a newly requested farewell/check.
+    this.systemActionsPending = (this.systemActionsPending ?? 0) + 1;
     const work = (this.systemActions ?? Promise.resolve())
       .catch(() => {})
       .then(() =>
         permitted()
           ? this.voiceAPI(action, body, operation)
           : { ok: true, skipped: true },
-      );
+      )
+      .finally(() => {
+        this.systemActionsPending--;
+      });
     this.systemActions = work;
     return work;
   }
@@ -736,7 +740,9 @@ export class VoiceBridge {
       response &&
       !response.suppressed &&
       !this.modelMustRemainSilent() &&
-      (!response.completed || this.speakingOutput()) &&
+      (!response.completed ||
+        response.waitingForQuiet ||
+        this.speakingOutput()) &&
       isAudibilityCheck(text)
     );
   }
@@ -935,12 +941,90 @@ export class VoiceBridge {
     await this.persist();
     await stop;
   }
+  completeBufferedResponse(id, response, release) {
+    if (response.finalized) return;
+    if (release) {
+      if (
+        !response.validated ||
+        response.suppressed ||
+        id !== this.controller.responseId
+      )
+        throw Error("Invalid buffered speech release");
+      this.encoder = new MuLawEncoder(this.outputRate);
+      for (const chunk of response.chunks) {
+        response.rendered += chunk.length;
+        this.controller.event({
+          type: "assistant_audio",
+          bytes: chunk.length,
+          rate: this.outputRate,
+        });
+        for (const pcmu of this.encoder.append(chunk))
+          this.sendMedia({
+            event: "media",
+            media: { payload: pcmu.toString("base64") },
+          });
+      }
+      for (const pcmu of this.encoder.drain(true))
+        this.sendMedia({
+          event: "media",
+          media: { payload: pcmu.toString("base64") },
+        });
+      this.spokenBlocks = 0;
+      this.silence.activity();
+    } else response.suppressed = true;
+    response.finalized = true;
+    response.waitingForQuiet = false;
+    response.chunks = [];
+    if (id === this.controller.responseId) {
+      this.controller.event({
+        type: "assistant_completed",
+        text: response.suppressed ? "" : response.text,
+        no_audio: !response.rendered,
+      });
+      this.marks.commit(id, response.rendered > 0);
+    }
+    const audit = (this.context.output_audit ??= {
+      completed_responses: 0,
+      released_responses: 0,
+      blocked_responses: 0,
+      released_pcm_bytes: 0,
+      recipient_reception_proven: false,
+    });
+    audit.completed_responses++;
+    if (response.rendered > 0) {
+      audit.released_responses++;
+      audit.released_pcm_bytes += response.rendered;
+    } else audit.blocked_responses++;
+    this.background(this.persist());
+  }
+  flushBufferedResponses() {
+    for (const [id, response] of this.responses) {
+      if (!response.waitingForQuiet || response.finalized) continue;
+      if (
+        this.ended ||
+        this.failing ||
+        response.suppressed ||
+        id !== this.controller.responseId ||
+        this.modelMustRemainSilent() ||
+        this.now() >= response.quietDeadline
+      ) {
+        response.blockReason ??= "quiet_wait_cancelled_or_expired";
+        this.completeBufferedResponse(id, response, false);
+      } else if (
+        !this.systemActionsPending &&
+        !this.activity?.active &&
+        !this.controller.speaking
+      )
+        this.completeBufferedResponse(id, response, true);
+    }
+  }
   async checkDialogue() {
     if (this.ended || this.failing || !this.controller || this.dialogueBusy)
       return;
     this.dialogueBusy = true;
     try {
       const c = this.controller;
+      this.flushBufferedResponses();
       const active = this.responses.get(c.responseId);
       if (
         active &&
@@ -1390,6 +1474,9 @@ export class VoiceBridge {
       this.voiceReadyResolve?.(true);
     } else if (frame.type === "response.created") {
       if (this.responses.has(id)) return;
+      for (const [previousId, previous] of this.responses)
+        if (previous.waitingForQuiet && !previous.finalized)
+          this.completeBufferedResponse(previousId, previous, false);
       if (this.responses.size >= 64) {
         for (const [key, value] of this.responses) {
           if (
@@ -1411,7 +1498,7 @@ export class VoiceBridge {
       });
       if (
         !this.context.initial_dialogue_response &&
-        this.context.ivr_progress?.state === "dialogue_candidate" &&
+        this.context.dialogue_candidate_observed &&
         !this.responses.get(id).suppressed
       )
         this.context.initial_dialogue_response = { id, started_at: this.now() };
@@ -1471,6 +1558,7 @@ export class VoiceBridge {
       const response = this.responses.get(id);
       if (!response || response.completed) return;
       response.completed = true;
+      response.completedAt = this.now();
       if (frame.response?.status === "cancelled") {
         if (id !== this.controller.responseId) return;
         if (response.rendered) {
@@ -1491,10 +1579,11 @@ export class VoiceBridge {
         }
         // Do not release model audio ahead of a fixed-speech cancellation.
         if (this.systemActions) await this.systemActions;
-        response.suppressed ||=
-          this.modelMustRemainSilent() ||
-          !!this.activity?.active ||
-          !!this.controller.speaking;
+        if (this.ended || this.failing || id !== this.controller.responseId) {
+          this.completeBufferedResponse(id, response, false);
+          return;
+        }
+        response.suppressed ||= this.modelMustRemainSilent();
         const transcript = (frame.response?.output ?? [])
           .flatMap((item) =>
             (item.content ?? [])
@@ -1522,50 +1611,14 @@ export class VoiceBridge {
             : null;
         if (violation) await this.rejectSpokenResponse(id, violation);
         if (!response.suppressed && response.chunks.length) {
-          this.encoder = new MuLawEncoder(this.outputRate);
-          for (const chunk of response.chunks) {
-            response.rendered += chunk.length;
-            this.controller.event({
-              type: "assistant_audio",
-              bytes: chunk.length,
-              rate: this.outputRate,
-            });
-            for (const pcmu of this.encoder.append(chunk))
-              this.sendMedia({
-                event: "media",
-                media: { payload: pcmu.toString("base64") },
-              });
-          }
-          for (const pcmu of this.encoder.drain(true))
-            this.sendMedia({
-              event: "media",
-              media: { payload: pcmu.toString("base64") },
-            });
-          this.spokenBlocks = 0;
-          this.silence.activity();
-        }
-        response.chunks = [];
-        this.controller.event({
-          type: "assistant_completed",
-          text: response.suppressed ? "" : response.text,
-          no_audio: !response.rendered,
-        });
-        this.marks.commit(id, response.rendered > 0);
-        // Generated assistant transcripts are not playback evidence. Count only
-        // audio handed to the media transport; this does not prove reception.
-        const audit = (this.context.output_audit ??= {
-          completed_responses: 0,
-          released_responses: 0,
-          blocked_responses: 0,
-          released_pcm_bytes: 0,
-          recipient_reception_proven: false,
-        });
-        audit.completed_responses++;
-        if (response.rendered > 0) {
-          audit.released_responses++;
-          audit.released_pcm_bytes += response.rendered;
-        } else audit.blocked_responses++;
-        this.background(this.persist());
+          response.validated = true;
+          // The transcript is final and immutable. Wait briefly for real quiet;
+          // a raw acoustic tail must not permanently discard a safe first reply.
+          // Meaningful new turns, holds, closure and newer responses still cancel.
+          response.waitingForQuiet = true;
+          response.quietDeadline = response.completedAt + 2000;
+          this.flushBufferedResponses();
+        } else this.completeBufferedResponse(id, response, false);
       }
     } else if (
       frame.type === "conversation.item.created" &&
@@ -1940,7 +1993,11 @@ export class VoiceBridge {
     clearTimeout(this.attentionDeadline);
     clearTimeout(this.controlledFarewellDeadline);
     this.turns?.close();
-    for (const response of this.responses.values()) response.chunks = [];
+    for (const [id, response] of this.responses) {
+      if (response.waitingForQuiet && !response.finalized)
+        this.completeBufferedResponse(id, response, false);
+      response.chunks = [];
+    }
     try {
       this.voice?.close();
     } catch {}

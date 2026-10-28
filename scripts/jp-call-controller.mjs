@@ -30,10 +30,18 @@ const menuNotComplete = () => ({
   instruction:
     "Wait silently for the complete current menu and read it again. No menu token was issued. Never invent a token or send a digit before a successful read.",
 });
+// A fixed invitation variation affects replay matching and duplicate detection,
+// never option text, advertised digits or the owner's approved task.
+const normalizeInvitation = (value) =>
+  value.replace(
+    /ご希望の番号を選択してくだい/g,
+    "ご希望の番号を選択してください",
+  );
 const replayText = (value) =>
-  normalize(String(value ?? ""))
-    .toLowerCase()
-    .replace(/[、。，,.!！\s]/g, "");
+  normalizeInvitation(normalize(String(value ?? "")).toLowerCase()).replace(
+    /[、。，,.!！\s]/g,
+    "",
+  );
 const replayIntroduction = (value) =>
   normalize(value).match(/次の([2-9])(?:つ|個)(?:の中)?から/);
 function replayPrefix(menu, value, cursor) {
@@ -306,12 +314,37 @@ export class CallController {
       if (replay) {
         // Consecutive STT finals can split the same replay across turns. Keep
         // a cursor only through its exact observed prefix; never renew menu.at.
-        this.replayCursor = { token: this.menu.token, text: replay };
+        this.replayCursor = {
+          token: this.menu.token,
+          text: replay,
+          startedAt:
+            this.replayCursor?.token === this.menu.token
+              ? this.replayCursor.startedAt
+              : at,
+        };
         this.menuAssembly = null;
         this.inputText = this.menu.text;
         this.lastTranscript = at;
         this.suspendedClosing = null;
         return;
+      }
+      const cursor = this.replayCursor;
+      if (
+        cursor?.token === this.menu?.token &&
+        this.menuSnapshotReady() &&
+        this.menu.replayCount &&
+        at - cursor.startedAt < 30000 &&
+        !replayIntroduction(fragment) &&
+        !/[「」『』“”"]/.test(fragment)
+      ) {
+        // An unmatching continuation revokes the old token. The count and text
+        // actually re-heard in THIS replay still constrain its fresh assembly;
+        // never inherit unobserved choices from the old complete snapshot.
+        this.menuAssembly = {
+          text: cursor.text,
+          expected: this.menu.replayCount,
+          startedAt: cursor.startedAt,
+        };
       }
       this.replayCursor = null;
       const countMatch = fragment.match(/次の([2-9])(?:つ|個)/);
@@ -407,7 +440,7 @@ export class CallController {
         isIvr: /押|選択|入力|メニュー|お選び|press|dial/i.test(text),
         text,
         token: this.token(),
-        core: digest(core.replace(/[。、,.\s]/g, "")),
+        core: digest(normalizeInvitation(core).replace(/[。、,.\s]/g, "")),
         spent: false,
         complete:
           /押してください|選択してください|入力してください|お選びください|press|dial/i.test(

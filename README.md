@@ -70,6 +70,8 @@ npm run build
 
 La suite verifica anche identità/scope errati, metadati inventati, duplicati, cambi dei dettagli, scadenze, richieste non pending, rate limit, concorrenza, replay e risultati incerti. La telefonia è un servizio locale simulato; nessun test chiama la produzione.
 
+Per IVR e prima risposta: `npm run test:voice-timings` esegue 1.440 variazioni temporali senza rete; `npm run test:voice-campaign` esegue 1.000 scenari simulati. [Confronto offline prima/dopo e limiti](docs/offline-ivr-first-reply-2026-10-28.md).
+
 Per il rilascio che corregge il refresh incrementale distribuire **Auth → MCP**:
 
 ```sh

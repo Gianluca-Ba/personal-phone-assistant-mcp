@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { VoiceBridge } from "../workers/voice/src/bridge.mjs";
+import { createOfflineVoiceFixture } from "./offline-voice-fixture.mjs";
 const args = Object.fromEntries(process.argv.slice(2).map((s) => s.split("=")));
 const count = Number(args.count ?? 1000),
   seed = Number(args.seed ?? 1);
@@ -29,153 +29,6 @@ const random = (n) => {
   rng = (Math.imul(rng, 1664525) + 1013904223) >>> 0;
   return rng % n;
 };
-class Memory {
-  data = new Map();
-  lock = Promise.resolve();
-  async get(k) {
-    return structuredClone(this.data.get(k));
-  }
-  async put(k, v) {
-    this.data.set(k, structuredClone(v));
-  }
-  transaction(fn) {
-    const p = this.lock.then(() => fn(this));
-    this.lock = p.catch(() => {});
-    return p;
-  }
-}
-class Socket {
-  readyState = 1;
-  frames = [];
-  accept() {}
-  addEventListener() {}
-  send(s) {
-    this.frames.push(JSON.parse(s));
-  }
-  close() {
-    this.readyState = 3;
-  }
-}
-async function fixture() {
-  let at = 1793152800000;
-  const network = [],
-    jobs = [];
-  const row = {
-    id: crypto.randomUUID(),
-    status: "dialing",
-    callback_token: crypto.randomUUID(),
-    destination_number: "+81343453600",
-    language: "ja",
-    instructions:
-      "Ask the authorized product availability question; do not invent answers.",
-  };
-  const env = {
-    VOICE_ORIGIN: "https://voice.example",
-    VOICE_APP_ID: "123456",
-    OUTBOUND_FROM: "+819011111111",
-    OUTBOUND_ASSISTANT_ID: "mock",
-    VOICE_EXECUTION_ENABLED: "true",
-    EXTERNAL_STT: "true",
-    CONTROLLED_FAREWELL: "true",
-    TELNYX_API_KEY: "MOCK_ONLY",
-    VOICE_CONTROL_API_SECRET: "MOCK_ONLY_32_CHARACTERS_NOT_A_SECRET",
-    DB: {
-      prepare: () => ({
-        bind: () => ({
-          first: async () => ({ ...row }),
-          run: async () => ({ success: true }),
-        }),
-      }),
-    },
-    PHONE_API: { fetch: async () => Response.json({ received: true }) },
-  };
-  const b = new VoiceBridge(new Memory(), env, {
-    now: () => at,
-    providerFetch: async (url, init = {}) => {
-      network.push({ url, body: init.body ? JSON.parse(init.body) : null });
-      return Response.json({ data: { is_alive: false } });
-    },
-  });
-  b.background = (p) => jobs.push(p);
-  await b.register({
-    request_id: row.id,
-    callback_token: row.callback_token,
-    destination: row.destination_number,
-    from: env.OUTBOUND_FROM,
-  });
-  const media = new Socket();
-  await b.attachMedia(media);
-  await b.bindCall("mock-call");
-  b.streamId = "mock-stream";
-  b.voice = new Socket();
-  await b.onVoice({
-    type: "session.created",
-    session: {
-      conversation_id: "mock-conversation",
-      audio: {
-        input: { format: { rate: 8000 } },
-        output: { format: { rate: 8000 } },
-      },
-    },
-  });
-  const pcm = Buffer.alloc(3200);
-  for (let i = 0; i < 1600; i++)
-    pcm.writeInt16LE(
-      Math.round(5000 * Math.sin((2 * Math.PI * 440 * i) / 8000)),
-      i * 2,
-    );
-  const recipient = async (text) => {
-    b.beginTurn();
-    b.deliverTranscript(text);
-    await Promise.all(jobs.splice(0));
-  };
-  const generate = async (id, text, { afterChunk } = {}) => {
-    await b.onVoice({ type: "response.created", response: { id } });
-    let pos = 0;
-    while (pos < pcm.length) {
-      const end = Math.min(pcm.length, pos + 2 * (1 + random(500)));
-      await b.onVoice({
-        type: "response.output_audio.delta",
-        response_id: id,
-        delta: pcm.subarray(pos, end).toString("base64"),
-      });
-      pos = end;
-      if (afterChunk) {
-        await afterChunk();
-        afterChunk = null;
-      }
-    }
-    assert.equal(
-      media.frames.filter((f) => f.event === "media").length,
-      0,
-      "no output before completed validation",
-    );
-    await b.onVoice({
-      type: "response.output_audio_transcript.delta",
-      response_id: id,
-      delta: text,
-    });
-    await b.onVoice({
-      type: "response.done",
-      response: { id, status: "completed" },
-    });
-  };
-  return {
-    b,
-    media,
-    network,
-    jobs,
-    recipient,
-    generate,
-    advance: (n) => (at += n),
-    frames: () => media.frames.filter((f) => f.event === "media"),
-    cleanup: async () => {
-      b.ended = true;
-      b.cleanup();
-      await Promise.all(jobs.splice(0));
-    },
-  };
-}
 const question = "予約なしで購入できますか。";
 const menu =
   "次の四つの中からご希望の番号を選択してください。営業時間は一を、サポートは二を、法人は三を、その他のご質問は五を押してください。";
@@ -191,6 +44,8 @@ const categories = [
   "blocked_report",
   "new_transfer",
   "recorded_repeated_introduction",
+  "validated_quiet_tail",
+  "quiet_wait_cancel_or_timeout",
 ];
 const results = [];
 const realFetch = globalThis.fetch;
@@ -201,7 +56,7 @@ try {
   for (let i = 0; i < count; i++) {
     const kind = i % categories.length,
       jitter = random(1900) + 800;
-    const f = await fixture();
+    const f = await createOfflineVoiceFixture({ random });
     try {
       if (kind === 0) {
         await f.generate("startup", question);
@@ -337,6 +192,29 @@ try {
           f.b.deferInitialAudibilityCheck("Apple川崎店舗案内でございます。"),
           false,
         );
+      }
+      if (kind === 11) {
+        await f.recipient("もしもし。");
+        f.b.activity.active = true;
+        await f.generate("tail", "はい、聞こえています。");
+        assert.equal(f.frames().length, 0);
+        f.advance(random(1999));
+        f.b.activity.active = false;
+        await f.b.checkDialogue();
+        assert.equal(f.frames().length, 10);
+        await f.b.checkDialogue();
+        assert.equal(f.frames().length, 10);
+      }
+      if (kind === 12) {
+        await f.recipient("もしもし。");
+        f.b.activity.active = true;
+        await f.generate("cancel-tail", "はい、聞こえています。");
+        if (random(2)) await f.recipient("少々お待ちください。");
+        else f.advance(2000 + random(1000));
+        f.b.activity.active = false;
+        await f.b.checkDialogue();
+        assert.equal(f.frames().length, 0);
+        assert.equal(f.b.responses.get("cancel-tail").chunks.length, 0);
       }
       results.push({
         id: i,

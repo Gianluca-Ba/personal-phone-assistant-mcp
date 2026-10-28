@@ -778,6 +778,63 @@ it("does not retain a stale token for an unobserved, changed, quoted or extended
     ).ok,
   ).toBe(false);
 });
+it("retains the token across the observed selection-introduction STT typo in either replay direction", async () => {
+  for (const [first, repeat] of [
+    ["ご希望の番号を選択してくだい。", "ご希望の番号を選択してください。"],
+    ["ご希望の番号を選択してください。", "ご希望の番号を選択してくだい。"],
+  ]) {
+    const h = harness();
+    h.menu("次の四つの中から" + first + appleChoices);
+    const snapshot = await h.c.command("read", "read_current_menu", {}),
+      at = h.c.menu.at;
+    h.menu("次の四つの中から");
+    h.menu(repeat);
+    expect(h.c.menu.token).toBe(snapshot.menu_token);
+    expect(h.c.menu.at).toBe(at);
+    const result = await h.c.command("select", "press_ivr_digit", {
+      digits: "5",
+      menu_token: snapshot.menu_token,
+    });
+    expect(result.ok).toBe(true);
+    expect(h.digits).toEqual(["5"]);
+  }
+});
+it("does not treat the invitation typo as a new allowance to resend a consumed digit", async () => {
+  const h = harness();
+  h.menu("次の四つの中からご希望の番号を選択してくだい。" + appleChoices);
+  const first = await h.c.command("first-read", "read_current_menu", {});
+  expect(
+    (
+      await h.c.command("first-select", "press_ivr_digit", {
+        digits: "5",
+        menu_token: first.menu_token,
+      })
+    ).ok,
+  ).toBe(true);
+  h.menu(appleIntro + appleChoices);
+  const repeated = await h.c.command("repeated-read", "read_current_menu", {});
+  expect(
+    (
+      await h.c.command("duplicate-select", "press_ivr_digit", {
+        digits: "5",
+        menu_token: repeated.menu_token,
+      })
+    ).reason,
+  ).toBe("RETRY_LIMIT");
+  expect(h.digits).toEqual(["5"]);
+});
+it("retains the newly heard count when an unmatching replay continuation invalidates the old token", async () => {
+  const h = harness();
+  h.menu(appleIntro + appleChoices);
+  const old = await h.c.command("read-old", "read_current_menu", {});
+  h.menu("次の四つの中から");
+  h.menu("ご希望の番号をお選びください。");
+  h.menu("営業時間は一を押してください。");
+  expect(h.c.menu.token).not.toBe(old.menu_token);
+  expect(h.c.menu.digits).toEqual(["1"]);
+  expect(h.c.menuSnapshotReady()).toBe(false);
+  expect(h.c.menuAssembly.expected).toBe(4);
+});
 it("retains a queued exact-token selection across successive committed replay fragments without renewing expiry", async () => {
   const h = harness();
   h.menu(appleIntro + appleChoices);
@@ -864,9 +921,15 @@ it("never carries old advertised digits into a different menu arriving within th
   h.advance(100);
   final("予約の変更は二を押してください。");
   h.advance(800);
-  const current = await h.c.command("new-menu", "read_current_menu", {});
-  expect(current.advertised_digits).toEqual(["2"]);
-  expect(current.menu).not.toContain("その他のご質問");
+  const reading = h.c.command("new-menu", "read_current_menu", {});
+  h.advance(3501);
+  await h.c.tick();
+  expect((await reading).reason).toBe("MENU_NOT_COMPLETE");
+  // Four choices were just re-announced. A changed single option must neither
+  // import old choices nor become a complete one-choice menu.
+  expect(h.c.menu.digits).toEqual(["2"]);
+  expect(h.c.menu.text).not.toContain("その他のご質問");
+  expect(h.c.menuAssembly.expected).toBe(4);
   expect(
     (
       await h.c.command("old-selection", "press_ivr_digit", {

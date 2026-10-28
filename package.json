@@ -21,6 +21,7 @@
     "test:phone-voice": "node scripts/verify-phone-voice.mjs",
     "test:voice-edge": "node scripts/test-voice-edge.mjs",
     "test:voice-campaign": "node scripts/offline-voice-campaign.mjs",
+    "test:voice-timings": "node scripts/offline-ivr-timing-sweep.mjs",
     "build:notifications": "esbuild workers/notifications/src/provider.mjs --bundle --format=esm --platform=browser --outfile=.wrangler/summary-build.mjs"
   },
   "dependencies": {

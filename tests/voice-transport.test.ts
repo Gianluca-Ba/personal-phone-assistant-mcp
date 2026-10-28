@@ -1031,6 +1031,188 @@ it("serializes metadata updates so an older write cannot overwrite the final aud
     JSON.parse(writes[1].metadata.voice_output_audit).released_pcm_bytes,
   ).toBe(3200);
 });
+it("keeps a validated first reply through a short acoustic tail and releases it once quiet", async () => {
+  const f = await dialogueFixture();
+  f.b.context.ivr_progress = { state: "dialogue_candidate", baseline: "" };
+  f.b.activity = { active: true };
+  await f.generate("quiet-tail", "はい、聞こえています。");
+  expect(f.media.frames.filter((m: any) => m.event === "media")).toHaveLength(
+    0,
+  );
+  expect(f.b.responses.get("quiet-tail").chunks.length).toBeGreaterThan(0);
+  f.advance(320);
+  f.b.activity.active = false;
+  await f.b.checkDialogue();
+  expect(f.media.frames.filter((m: any) => m.event === "media")).toHaveLength(
+    10,
+  );
+  await f.b.checkDialogue();
+  expect(f.media.frames.filter((m: any) => m.event === "media")).toHaveLength(
+    10,
+  );
+});
+it.each(["question", "hold", "new_response", "timeout", "cleanup"])(
+  "drops waiting validated speech on %s without later release",
+  async (reason) => {
+    const f = await dialogueFixture();
+    f.b.activity = { active: true };
+    await f.generate("waiting", "はい、聞こえています。");
+    const deadline = f.b.responses.get("waiting").quietDeadline;
+    expect(f.b.responses.get("waiting").waitingForQuiet).toBe(true);
+    if (reason === "question")
+      f.recipient("違います。予約の変更をお願いできますか？");
+    if (reason === "hold") f.recipient("少々お待ちください。");
+    if (reason === "new_response")
+      await f.b.onVoice({
+        type: "response.created",
+        response: { id: "new-response" },
+      });
+    if (reason === "timeout") {
+      f.advance(1000);
+      f.recipient("もしもし。");
+      expect(f.b.responses.get("waiting").quietDeadline).toBe(deadline);
+      f.advance(1000);
+    }
+    if (reason === "cleanup") {
+      f.b.ended = true;
+      f.b.cleanup();
+    }
+    f.b.activity.active = false;
+    await f.b.checkDialogue();
+    expect(f.media.frames.filter((m: any) => m.event === "media")).toHaveLength(
+      0,
+    );
+    expect(f.b.responses.get("waiting").chunks).toEqual([]);
+    expect(f.b.context.output_audit.released_responses).toBe(0);
+    f.advance(3000);
+    await f.b.checkDialogue();
+    expect(f.media.frames.filter((m: any) => m.event === "media")).toHaveLength(
+      0,
+    );
+  },
+);
+it("does not emit queued model audio while a fixed-speech stop is still pending", async () => {
+  const f = await dialogueFixture();
+  f.b.activity = { active: true };
+  await f.generate("pending-stop", "はい、聞こえています。");
+  let release: any, started: any;
+  const ready = new Promise((r) => (started = r));
+  f.b.voiceAPI = async () => {
+    started();
+    return new Promise((r) => (release = () => r({ ok: true })));
+  };
+  const stopping = f.b.systemVoiceAction(
+    "playback_stop",
+    { stop: "all" },
+    "local-stop",
+  );
+  await ready;
+  f.b.activity.active = false;
+  await f.b.checkDialogue();
+  expect(f.media.frames.filter((m: any) => m.event === "media")).toHaveLength(
+    0,
+  );
+  release();
+  await stopping;
+  f.advance(200);
+  await f.b.checkDialogue();
+  expect(f.media.frames.filter((m: any) => m.event === "media")).toHaveLength(
+    10,
+  );
+});
+it("does not renew the quiet deadline after a slow fixed-speech cancellation", async () => {
+  const f = await dialogueFixture();
+  await f.b.onVoice({
+    type: "response.created",
+    response: { id: "slow-stop" },
+  });
+  await f.b.onVoice({
+    type: "response.output_audio.delta",
+    response_id: "slow-stop",
+    delta: Buffer.alloc(3200).toString("base64"),
+  });
+  await f.b.onVoice({
+    type: "response.output_audio_transcript.delta",
+    response_id: "slow-stop",
+    delta: "はい、聞こえています。",
+  });
+  let release: any;
+  f.b.systemActions = new Promise((r) => (release = r));
+  const completed = f.b.onVoice({
+    type: "response.done",
+    response: { id: "slow-stop", status: "completed" },
+  });
+  f.advance(2001);
+  release();
+  await completed;
+  await f.b.checkDialogue();
+  expect(f.media.frames.filter((m: any) => m.event === "media")).toHaveLength(
+    0,
+  );
+});
+it("cannot validate or release an old response that a new generation supersedes during a pending stop", async () => {
+  const f = await dialogueFixture();
+  await f.b.onVoice({
+    type: "response.created",
+    response: { id: "old-during-stop" },
+  });
+  await f.b.onVoice({
+    type: "response.output_audio.delta",
+    response_id: "old-during-stop",
+    delta: Buffer.alloc(3200).toString("base64"),
+  });
+  await f.b.onVoice({
+    type: "response.output_audio_transcript.delta",
+    response_id: "old-during-stop",
+    delta: "Call Summary: unable_to_proceed",
+  });
+  let release: any;
+  f.b.systemActions = new Promise((r) => (release = r));
+  const old = f.b.onVoice({
+    type: "response.done",
+    response: { id: "old-during-stop", status: "completed" },
+  });
+  await f.b.onVoice({
+    type: "response.created",
+    response: { id: "new-during-stop" },
+  });
+  release();
+  await old;
+  expect(f.b.controller.responseId).toBe("new-during-stop");
+  expect(f.b.responses.get("new-during-stop").suppressed).toBe(false);
+  expect(f.b.spokenBlocks).toBe(0);
+  expect(f.media.frames.filter((m: any) => m.event === "media")).toHaveLength(
+    0,
+  );
+});
+it("validates transcript safety before waiting for quiet and permits no late transcript replacement", async () => {
+  const f = await dialogueFixture();
+  f.b.activity = { active: true };
+  await f.generate("unsafe-quiet", "Call Summary: unable_to_proceed");
+  f.b.activity.active = false;
+  await f.b.checkDialogue();
+  expect(f.media.frames.filter((m: any) => m.event === "media")).toHaveLength(
+    0,
+  );
+  await f.b.onVoice({
+    type: "response.output_audio_transcript.delta",
+    response_id: "unsafe-quiet",
+    delta: "はい、聞こえています。",
+  });
+  expect(f.b.responses.get("unsafe-quiet").text).toContain("Call Summary");
+});
+it("sets the first-reply grace for direct pickup without requiring an earlier IVR", async () => {
+  const f = await dialogueFixture();
+  delete f.b.context.ivr_progress;
+  await f.b.onVoice({
+    type: "response.created",
+    response: { id: "direct-pickup" },
+  });
+  expect(f.b.context.initial_dialogue_response.id).toBe("direct-pickup");
+  f.advance(1500);
+  f.recipient("Apple川崎店舗案内でございます。");
+  expect(f.b.responses.get("direct-pickup").suppressed).toBe(false);
+});
 it("lets the first validated reply finish through repeated audibility checks, with a fixed nonrenewable grace", async () => {
   const f = await dialogueFixture();
   f.b.context.ivr_progress = { state: "dialogue_candidate", baseline: "" };
