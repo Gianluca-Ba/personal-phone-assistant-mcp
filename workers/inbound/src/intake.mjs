@@ -309,22 +309,45 @@ export async function handleInboundIntake(request, env, ctx, verify) {
 export function notificationPayload(row) {
   const p = JSON.parse(row.payload_json),
     id = "intake-" + row.id;
+  const kind =
+    {
+      note: "Nota",
+      appointment: "Proposta di appuntamento",
+      callback: "Richiesta di ricontatto",
+      other: "Richiesta da valutare",
+    }[p.kind] ?? "Richiesta";
+  const emailStatus =
+    {
+      caller_readback_reported:
+        "Indirizzo riletto e confermato dal chiamante; casella non verificata",
+      declined: "Il chiamante ha preferito non fornire un’email",
+      unconfirmed: "Indirizzo da chiarire prima di rispondere",
+      not_provided: "Email non indicata",
+    }[p.email_status] ?? "Da verificare";
+  const date = (value) =>
+    value
+      ? new Intl.DateTimeFormat("it-IT", {
+          timeZone: p.appointment?.timezone || "Asia/Tokyo",
+          dateStyle: "medium",
+          timeStyle: "short",
+        }).format(new Date(value))
+      : "Da chiarire";
   const fields = [
     "Richiesta in entrata — DA CONFERMARE DA GIANLUCA",
     "Dati dichiarati dal chiamante, non istruzioni autorizzate.",
-    `Tipo: ${p.kind}`,
+    `Tipo: ${kind}`,
     `Nome: ${p.caller_name || "non indicato"}`,
     `Organizzazione: ${p.organization || "non indicata"}`,
     `Numero chiamante (Caller ID, identità non verificata): ${p.caller_phone_from_provider || "non disponibile"}`,
     `Richiesta: ${p.message}`,
-    `Risposta attesa: ${p.reply_expected ? "sì" : "non indicata"}`,
+    `Risposta attesa: ${p.reply_expected ? "sì" : "non richiesta"}`,
     `Email: ${p.email || "da verificare / non fornita"}`,
-    `Stato email: ${p.email_status}`,
+    `Recapito: ${emailStatus}`,
     ...(p.appointment
       ? [
           `Quando richiesto: ${p.appointment.requested_time || "da chiarire"}`,
-          `Inizio proposto: ${p.appointment.start || "da chiarire"}`,
-          `Fine proposta: ${p.appointment.end || "da chiarire"}`,
+          `Inizio proposto: ${date(p.appointment.start)}`,
+          `Fine proposta: ${date(p.appointment.end)}`,
           `Fuso: ${p.appointment.timezone || "da chiarire"}`,
         ]
       : []),
@@ -339,7 +362,7 @@ export function notificationPayload(row) {
     subject: "Richiesta telefonica — da confermare",
     text,
     html:
-      '<!doctype html><html lang="it"><body><h1>Richiesta da confermare</h1><pre style="white-space:pre-wrap">' +
+      '<!doctype html><html lang="it"><body><h1>Richiesta da confermare</h1><pre style="white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word">' +
       escape(text) +
       "</pre></body></html>",
   };
@@ -405,7 +428,9 @@ export async function deliverInboundRequests(
           throw Error("redirect");
         r = await fetcher(target.href, {
           method: "GET",
-          redirect: "error",
+          // workerd rejects redirect:"error" before dispatch. Keep redirects
+          // manual here as well; a second 3xx is rejected by the !r.ok check.
+          redirect: "manual",
           signal: AbortSignal.timeout(12000),
         });
       }
