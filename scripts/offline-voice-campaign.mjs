@@ -190,6 +190,7 @@ const categories = [
   "terminal",
   "blocked_report",
   "new_transfer",
+  "recorded_repeated_introduction",
 ];
 const results = [];
 const realFetch = globalThis.fetch;
@@ -309,6 +310,26 @@ try {
         await f.recipient("もしもし。");
         await f.generate("report", "Call Summary: unable_to_proceed");
         assert.equal(f.frames().length, 0);
+      }
+      if (kind === 10) {
+        await f.recipient("もしもし、ご用件をお伺いします。");
+        f.b.context.ivr_progress = {
+          state: "dialogue_candidate",
+          baseline: "",
+        };
+        await f.generate("first-intro-reply", "はい、聞こえています。", {
+          afterChunk: async () => {
+            f.advance(jitter);
+            await f.recipient("Apple川崎店舗案内でございます。");
+          },
+        });
+        assert.equal(f.frames().length, 10);
+        assert.equal(f.b.context.deferred_audibility_checks, 1);
+        f.advance(10001);
+        assert.equal(
+          f.b.deferInitialAudibilityCheck("Apple川崎店舗案内でございます。"),
+          false,
+        );
       }
       results.push({
         id: i,

@@ -225,6 +225,9 @@ export function isAudibilityCheck(text) {
   const first = parts.shift() ?? "";
   const check =
     /^(?:もしもし){1,2}$/.test(first) ||
+    /^(?:Apple|アップル)(?:Store|ストア)?(?:川崎|カワサキ|kawasaki|銀座|ギンザ|ginza|渋谷|シブヤ|shibuya|丸の内|マルノウチ|marunouchi|表参道|オモテサンドウ|omotesando)(?:店)?(?:店舗案内|電話案内)?(?:です|でございます)$/i.test(
+      first,
+    ) ||
     /^(?:お?客様)?(?:こちらの)?(?:お声|音声|声)(?:は|が)?(?:届いて|聞こえて)(?:おります|います|いらっしゃいます)(?:でしょう)?か(?:ね)?$/.test(
       first,
     ) ||

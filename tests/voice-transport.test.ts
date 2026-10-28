@@ -963,6 +963,74 @@ it("blocks initial questions and recorded welcomes until recipient dialogue evid
   });
   expect(f.b.context.output_audit.released_responses).toBe(1);
 });
+it("keeps the first checked acknowledgement through the recorded repeated staff introduction", async () => {
+  const f = await dialogueFixture();
+  f.b.context.ivr_progress = { state: "dialogue_candidate", baseline: "" };
+  await f.b.onVoice({
+    type: "response.created",
+    response: { id: "intro-ack" },
+  });
+  await f.b.onVoice({
+    type: "response.output_audio.delta",
+    response_id: "intro-ack",
+    delta: Buffer.alloc(3200).toString("base64"),
+  });
+  f.advance(4120);
+  f.recipient("Apple川崎店舗案内でございます。");
+  expect(f.b.context.deferred_audibility_checks).toBe(1);
+  expect(f.b.responses.get("intro-ack").suppressed).toBe(false);
+  await f.b.onVoice({
+    type: "response.output_audio_transcript.delta",
+    response_id: "intro-ack",
+    delta: "はい、聞こえています。",
+  });
+  await f.b.onVoice({
+    type: "response.done",
+    response: { id: "intro-ack", status: "completed" },
+  });
+  expect(f.media.frames.filter((x: any) => x.event === "media")).toHaveLength(
+    10,
+  );
+  f.advance(6000);
+  expect(
+    f.b.deferInitialAudibilityCheck("Apple川崎店舗案内でございます。"),
+  ).toBe(false);
+  expect(
+    f.b.deferInitialAudibilityCheck(
+      "Apple川崎店舗案内でございます。在庫はありません。",
+    ),
+  ).toBe(false);
+});
+it("serializes metadata updates so an older write cannot overwrite the final audio audit", async () => {
+  const f = fixture();
+  await f.register();
+  f.b.context.call_id = "bound-call";
+  f.b.context.conversation_id = "local-conversation";
+  let release: any, started: any;
+  const ready = new Promise((r) => (started = r));
+  const writes: any[] = [];
+  f.b.providerFetch = async (_url: string, options: any) => {
+    writes.push(JSON.parse(options.body));
+    if (writes.length === 1) {
+      started();
+      return new Promise((r) => (release = () => r(Response.json({}))));
+    }
+    return Response.json({});
+  };
+  const first = f.b.bindConversation(true);
+  await ready;
+  f.b.context.output_audit = { released_pcm_bytes: 3200 };
+  const final = f.b.bindConversation(true);
+  f.b.context.terminal_at = new Date().toISOString();
+  expect(writes).toHaveLength(1);
+  release();
+  await Promise.all([first, final]);
+  expect(writes).toHaveLength(2);
+  expect(writes[1].metadata.voice_output_audit_final).toBe("true");
+  expect(
+    JSON.parse(writes[1].metadata.voice_output_audit).released_pcm_bytes,
+  ).toBe(3200);
+});
 it("lets the first validated reply finish through repeated audibility checks, with a fixed nonrenewable grace", async () => {
   const f = await dialogueFixture();
   f.b.context.ivr_progress = { state: "dialogue_candidate", baseline: "" };

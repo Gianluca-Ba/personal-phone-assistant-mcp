@@ -40,6 +40,22 @@ ledger prevents duplicate batches and uncertain live outcomes are never retried.
 No live call is launched by the offline script. Raw recordings, credentials,
 phone request identities and private outcomes remain outside version control.
 
+The third live tranche exposed silent output despite recorded staff introductions.
+The same recorded handoff replayed through the configured recognizer produced
+valid greeting candidates, so an unrecognized greeting cannot be asserted as the
+sole cause. The remote-hangup metadata was only an intermediate snapshot. Metadata
+PUTs are now serialized and remote hangup publishes a final audit, explicitly
+labelled by `voice_output_audit_final`. Playback measurements remain stronger
+evidence than generated text or an intermediate counter.
+
+The recorded repeated `Apple川崎店舗案内でございます` introduction also reproduces
+cancellation of an unfinished first reply. Only the existing first-response,
+nonrenewable ten-second grace now includes narrow, pure Apple-store introductions.
+An appended inventory statement, question, hold request or quote is not exempt.
+The observed scenario is added as an independent positive fixture to the seeded
+campaign; it is not classified using the same function being tested as an oracle.
+This correction preserves cancellation after the deadline and on later responses.
+
 These counts measure simulated control/transport behavior, not independent human
 conversations, ASR accuracy, model latency or general PSTN reliability. No change
 to inbound or the production phone Worker is necessary. Rollback uses the saved

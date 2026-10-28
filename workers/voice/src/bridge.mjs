@@ -437,6 +437,16 @@ export class VoiceBridge {
     }
   }
   async bindConversation(force = false) {
+    // Serialize metadata writes. An older PUT must not overwrite the final
+    // audit when the callee ends the call while an update is still in flight.
+    const previous = this.metadataUpdate ?? Promise.resolve();
+    const current = previous
+      .catch(() => {})
+      .then(() => this.updateConversationMetadata(force));
+    this.metadataUpdate = current;
+    return current;
+  }
+  async updateConversationMetadata(force = false) {
     if (
       !this.context?.conversation_id ||
       (!force && this.context.metadata_bound) ||
@@ -466,6 +476,9 @@ export class VoiceBridge {
               this.context.controlled_closing?.outcome ??
               "unspecified",
             system_farewell_played: this.context.system_farewell_played
+              ? "true"
+              : "false",
+            voice_output_audit_final: this.context.terminal_at
               ? "true"
               : "false",
             deferred_audibility_checks: String(
@@ -1789,6 +1802,9 @@ export class VoiceBridge {
       await this.persist();
       this.ended = true;
       this.cleanup();
+      // Remote hangup also publishes the latest audit. Status delivery above
+      // remains successful if this optional metadata service is unavailable.
+      await this.bindConversation(true).catch(() => {});
     } else if (
       event.event_type === "call.speak.ended" &&
       this.context.attention?.state === payload.client_state &&

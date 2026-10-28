@@ -6,6 +6,8 @@ it("distinguishes pure audibility checks from task questions, corrections, holds
   for (const text of [
     "もしもし。",
     "もしもし？",
+    "Apple川崎店舗案内でございます。",
+    "AppleKawasaki店舗案内でございます。",
     "お声届いておりますでしょうか？",
     "お客様、お声は届いておりますでしょうか?Apple丸の内につながっております。",
     "客様お声は届いておりますでしょうか?丸土地につながっております。",
@@ -13,6 +15,9 @@ it("distinguishes pure audibility checks from task questions, corrections, holds
     expect(isAudibilityCheck(text), text).toBe(true);
   for (const text of [
     "もしもし、やめてください。",
+    "Apple川崎店舗案内でございます。在庫はありません。",
+    "Apple川崎店舗案内でございます。少々お待ちください。",
+    "『Apple川崎店舗案内でございます』と言っていました。",
     "もしもし、在庫はありますか？",
     "お声は届いていますか？少々お待ちください。",
     "『もしもし』と言っていました。",
