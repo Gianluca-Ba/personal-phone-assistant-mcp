@@ -21,6 +21,12 @@ import { dialPayload, taskFingerprint, statusForEnd } from "./contract.mjs";
 import { sha256, sameSecret, parseState } from "./security.mjs";
 const json = (body, status = 200) => Response.json(body, { status });
 const uuid = () => crypto.randomUUID();
+// Match the WHOLE observed interim. A routing sentence followed by an unknown
+// suffix, greeting or question must retain the normal recipient speech guard.
+const routingOnlyInterim = (text) =>
+  /^(?:次[、,\s]*)?(?:ただいま[、,\s]*)?(?:お電話を|担当者に)?(?:おつなぎ|お繋ぎ|転送)(?:いたしております|しております|しています|いたします|します)[。、.!！\s]*(?:(?:少々|しばらく|そのまま)?お待ちください[。、.!！\s]*)?$/.test(
+    String(text).normalize("NFKC").trim(),
+  ) || isHoldFiller(text);
 const commandUUID = (value) => {
   const h = sha256(value);
   return (
@@ -484,6 +490,13 @@ export class VoiceBridge {
             deferred_audibility_checks: String(
               this.context.deferred_audibility_checks ?? 0,
             ),
+            ...(this.context.closure_timing
+              ? {
+                  voice_closure_timing: JSON.stringify(
+                    this.context.closure_timing,
+                  ),
+                }
+              : {}),
             voice_dialogue_gate: JSON.stringify({
               required: this.context.dialogue_gate_required === true,
               candidate_observed: !!this.context.dialogue_candidate_observed,
@@ -553,10 +566,11 @@ export class VoiceBridge {
   }
   async terminate(outcome, operation) {
     this.context.close_outcome = outcome;
-    await this.bindConversation(true);
+    this.observeClosurePhase("hangup_requested");
     await this.persist();
     const result = await this.voiceAPI("hangup", {}, operation);
     if (!result.ok) throw Error("Hangup unconfirmed");
+    this.observeClosurePhase("hangup_accepted");
     this.ended = true;
     clearInterval(this.inputPump);
     clearInterval(this.timer);
@@ -564,6 +578,24 @@ export class VoiceBridge {
       this.media?.close();
     } catch {}
     this.cleanupDelay = setTimeout(() => this.cleanup(), 15000);
+    // Optional summary metadata must never delay an actual telephone hangup.
+    this.background(this.bindConversation(true));
+  }
+  observeClosurePhase(phase, details = {}) {
+    const timing = (this.context.closure_timing ??= {});
+    timing[phase + "_at"] = this.now();
+    this.background(
+      this.recordEvent(
+        "closure_" + phase,
+        String(this.context.farewell_generation ?? 0),
+        {
+          ...details,
+          ...(timing.hold_deadline !== undefined
+            ? { since_hold_deadline_ms: this.now() - timing.hold_deadline }
+            : {}),
+        },
+      ),
+    );
   }
   async playControlledFarewell(outcome, op) {
     // The model never supplies the farewell audio in the controlled route.
@@ -571,6 +603,7 @@ export class VoiceBridge {
     const generation = (this.context.farewell_generation ?? 0) + 1;
     if (generation > 3) throw Error("Farewell interruption limit");
     this.context.farewell_generation = generation;
+    this.observeClosurePhase("farewell_requested");
     const state = Buffer.from(
       JSON.stringify({
         request_id: this.context.request_id,
@@ -603,6 +636,8 @@ export class VoiceBridge {
         !closing.cancelled &&
         this.context.controlled_closing === closing,
     );
+    if (result.ok && !result.skipped)
+      this.observeClosurePhase("farewell_accepted");
     if (!result.ok && !closing.cancelled)
       throw Error("Farewell playback unconfirmed");
     if (
@@ -730,7 +765,7 @@ export class VoiceBridge {
           this.responses.get(this.controller.responseId)?.rendered > 0))
     );
   }
-  deferInitialAudibilityCheck(text) {
+  initialReplyCanContinue() {
     const first = this.context.initial_dialogue_response;
     const response = first && this.responses.get(first.id);
     return !!(
@@ -740,10 +775,18 @@ export class VoiceBridge {
       response &&
       !response.suppressed &&
       !this.modelMustRemainSilent() &&
-      (!response.completed ||
-        response.waitingForQuiet ||
-        this.speakingOutput()) &&
-      isAudibilityCheck(text)
+      (!response.completed || response.waitingForQuiet || this.speakingOutput())
+    );
+  }
+  deferInitialAudibilityCheck(text) {
+    return this.initialReplyCanContinue() && isAudibilityCheck(text);
+  }
+  deferInitialBackchannel(text) {
+    return !!(
+      this.initialReplyCanContinue() &&
+      !this.controller.assistantQuestionPending &&
+      this.responses.get(this.controller.responseId)?.rendered === 0 &&
+      isBackchannel(text)
     );
   }
   cancelOutput() {
@@ -1024,6 +1067,29 @@ export class VoiceBridge {
     this.dialogueBusy = true;
     try {
       const c = this.controller;
+      // Nova can leave the transfer announcement's turn open throughout hold
+      // music. Energy alone does not make that stale announcement a new human
+      // sentence. This exception is limited to an expired routing lease and a
+      // whole, unchanged wait-only interim observed at least five seconds ago.
+      c.routingHoldAudioOnly = !!(
+        this.env.EXTERNAL_STT === "true" &&
+        this.routingWait() &&
+        this.recipientInterim?.waitOnly &&
+        this.now() - this.recipientInterim.changedAt >= 5000
+      );
+      if (
+        c.hold &&
+        this.now() >= c.hold.deadline &&
+        this.context.closure_timing?.hold_deadline !== c.hold.deadline
+      ) {
+        this.context.closure_timing = { hold_deadline: c.hold.deadline };
+        this.observeClosurePhase("timeout_observed", {
+          speaking: c.speaking,
+          routing_audio_only: c.routingHoldAudioOnly,
+          acoustic_guard_pending: this.now() < c.acousticGuardUntil,
+          transport_pending: this.marks.pending.size > 0,
+        });
+      }
       this.flushBufferedResponses();
       const active = this.responses.get(c.responseId);
       if (
@@ -1102,6 +1168,8 @@ export class VoiceBridge {
   beginTurn() {
     if (this.turnOpen) return;
     this.turnOpen = true;
+    this.recipientInterim = null;
+    this.controller.routingHoldAudioOnly = false;
     const answeringCompletedQuestion =
       this.controller.assistantQuestionPending &&
       this.controller.playback.remaining(this.now()) <= 0;
@@ -1117,6 +1185,33 @@ export class VoiceBridge {
     this.silence.activity();
     this.controller.event({ type: "input_audio_buffer.speech_started" });
   }
+  observeRecipientInterim(text) {
+    const normalized = menuText(text);
+    if (!normalized) return;
+    const waitOnly = routingOnlyInterim(text);
+    if (
+      this.recipientInterim?.normalized !== normalized ||
+      this.recipientInterim?.waitOnly !== waitOnly
+    )
+      this.recipientInterim = {
+        normalized,
+        changedAt: this.now(),
+        waitOnly,
+      };
+    // Withdraw the exception synchronously, including while the farewell's
+    // storage/API await is in flight. A partial greeting is not ignored merely
+    // because it shares the still-open STT turn with the old announcement.
+    if (!waitOnly) {
+      this.controller.routingHoldAudioOnly = false;
+      if (
+        this.context.controlled_closing &&
+        !this.context.controlled_closing.cancelled &&
+        this.controller.holdExpired &&
+        !isBackchannel(text)
+      )
+        this.background(this.cancelControlledFarewell());
+    }
+  }
   currentHoldFiller(text) {
     return !!(
       (this.controller?.hold || this.controller?.holdExpired) &&
@@ -1125,6 +1220,8 @@ export class VoiceBridge {
   }
   deliverTranscript(text) {
     if (this.ended || this.failing) return;
+    this.recipientInterim = null;
+    this.controller.routingHoldAudioOnly = false;
     if (this.context.stt_observations && /[五5].{0,6}押してください/.test(text))
       this.context.stt_observations.delivered_five++;
     const holdFiller = this.currentHoldFiller(text);
@@ -1149,7 +1246,10 @@ export class VoiceBridge {
     const turn = classifyRecipientTurn(text, { overlapped: this.overlapped });
     const deferredCheck = this.deferInitialAudibilityCheck(text);
     const listening =
-      turn.kind === "backchannel" || holdFiller || deferredCheck;
+      turn.kind === "backchannel" ||
+      holdFiller ||
+      deferredCheck ||
+      this.deferInitialBackchannel(text);
     if (deferredCheck)
       this.context.deferred_audibility_checks =
         (this.context.deferred_audibility_checks ?? 0) + 1;
@@ -1311,6 +1411,7 @@ export class VoiceBridge {
       this.turns = new SttTurns({
         onStart: () => this.beginTurn(),
         onInterim: (text) => {
+          this.observeRecipientInterim(text);
           this.observeRoutingInterim(text);
           this.controller.event({
             type: "recipient_interim_transcript",
@@ -1329,6 +1430,8 @@ export class VoiceBridge {
         },
         onEnd: ({ hasTranscript }) => {
           if (!hasTranscript && this.turnOpen) {
+            this.recipientInterim = null;
+            this.controller.routingHoldAudioOnly = false;
             this.turnOpen = false;
             this.controller.event({
               type: "recipient_turn_untranscribed",
@@ -1877,6 +1980,7 @@ export class VoiceBridge {
     ) {
       this.context.system_farewell_played = true;
       this.context.controlled_closing.completed = true;
+      this.observeClosurePhase("farewell_completed");
       clearTimeout(this.controlledFarewellDeadline);
       await this.persist();
       this.controller?.event({ type: "system_farewell_completed" });

@@ -1440,3 +1440,19 @@ it("does not restore cancelled closing or farewell evidence when an untranscribe
   expect(h.c.playbackAck).toBe(false);
   expect(h.closed).toEqual([]);
 });
+
+it("never applies routing-only timeout recovery to a requested human hold", async () => {
+  const h = harness();
+  let farewells = 0;
+  h.c.playFarewell = async () => {
+    farewells++;
+  };
+  h.menu("確認しますので少々お待ちください。");
+  h.c.event({ type: "input_audio_buffer.speech_started" });
+  h.c.routingHoldAudioOnly = true;
+  h.advance(90000);
+  await h.c.tick();
+  expect(h.c.holdExpiry.kind).toBe("requested");
+  expect(farewells).toBe(0);
+  expect(h.closed).toEqual([]);
+});

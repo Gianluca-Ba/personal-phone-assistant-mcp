@@ -72,6 +72,8 @@ La suite verifica anche identità/scope errati, metadati inventati, duplicati, c
 
 Per IVR e prima risposta: `npm run test:voice-timings` esegue 1.440 variazioni temporali senza rete; `npm run test:voice-campaign` esegue 1.000 scenari simulati. [Confronto offline prima/dopo e limiti](docs/offline-ivr-first-reply-2026-10-28.md).
 
+`npm run test:voice-handoff` aggiunge 1.225 combinazioni di prima risposta e 96 casi di chiusura con turni STT sospesi. Audio, callback e ritardi sono simulati; nessuna chiamata viene avviata. [Chiusura e aizuchi: correzioni e limiti](docs/outbound-closure-handoff-2026-10-28.md).
+
 Per il rilascio che corregge il refresh incrementale distribuire **Auth → MCP**:
 
 ```sh

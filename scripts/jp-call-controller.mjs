@@ -194,6 +194,9 @@ export class CallController {
     this.readWaiters = [];
     this.selectionWaiters = [];
     this.acousticGuardUntil = 0;
+    // Set only by the authenticated outbound adapter for a stale STT turn
+    // containing exclusively a routing/wait announcement, never model input.
+    this.routingHoldAudioOnly = false;
     this.inputText = "";
     this.lastTranscript = null;
     this.lastRawTranscript = "";
@@ -858,6 +861,7 @@ export class CallController {
       this.holdExpiry = {
         since: this.hold.since,
         deadline: this.hold.deadline,
+        kind: this.hold.kind,
       };
       this.hold = null;
       this.holdExpired = true;
@@ -920,24 +924,28 @@ export class CallController {
       else if (at >= w.deadline) w.resolve(menuNotComplete());
       else this.selectionWaiters.push(w);
     }
+    const staleRoutingAudio =
+      this.pending?.reason === "hold_timeout" &&
+      this.holdExpiry?.kind === "routing" &&
+      this.routingHoldAudioOnly === true;
     if (
       !this.pending ||
       this.closed ||
       this.closing ||
-      this.speaking ||
+      (this.speaking && !staleRoutingAudio) ||
       this.selectionWaiters.length > 0 ||
-      at < this.acousticGuardUntil ||
+      (at < this.acousticGuardUntil && !staleRoutingAudio) ||
       (this.requirePlaybackAck && !this.playbackAck) ||
       this.responseActive ||
       this.assistantQuestionPending ||
       this.closingBlocked ||
       (!this.farewell && !this.playFarewell) ||
       this.transportQueuePending ||
-      this.lastSpeechEnd === null
+      (this.lastSpeechEnd === null && !staleRoutingAudio)
     )
       return false;
     if (
-      at - this.lastSpeechEnd < 750 ||
+      (!staleRoutingAudio && at - this.lastSpeechEnd < 750) ||
       at - this.playback.end < 250 ||
       (this.farewell && at - this.farewell.at < 250)
     )
