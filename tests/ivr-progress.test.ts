@@ -119,6 +119,8 @@ it("recognizes the recorded staff greeting after routing without requiring moshi
     "お電話ありがとうございます。アップル川崎です。",
     "AppleStore銀座のテストです。",
     "Apple丸の内店舗案内です。",
+    "AppleShibuya店舗案内でございます。",
+    "Apple表参道店舗案内でございます。",
   ]) {
     expect(progressEvidence(baseline, greeting)).toMatchObject({
       kind: "human_greeting_candidate",

@@ -55,6 +55,9 @@ An appended inventory statement, question, hold request or quote is not exempt.
 The observed scenario is added as an independent positive fixture to the seeded
 campaign; it is not classified using the same function being tested as an oracle.
 This correction preserves cancellation after the deadline and on later responses.
+Direct introduction candidates cover all five stores in the pilot, including
+Shibuya/Omotesando and observed romanized store names; a welcome addressed to the
+caller and conditional/quoted greetings still do not establish dialogue.
 
 These counts measure simulated control/transport behavior, not independent human
 conversations, ASR accuracy, model latency or general PSTN reliability. No change

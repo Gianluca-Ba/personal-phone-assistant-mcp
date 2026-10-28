@@ -264,7 +264,14 @@ try {
         assert.equal(f.b.controller.pending.outcome, "unable_to_proceed");
       }
       if (kind === 4) {
-        await f.recipient("もしもし、ご用件をお伺いします。");
+        await f.recipient(
+          [
+            "もしもし、ご用件をお伺いします。",
+            "Apple川崎店舗案内でございます。",
+            "AppleShibuya店舗案内でございます。",
+            "Apple表参道店舗案内でございます。",
+          ][random(4)],
+        );
         f.advance(jitter);
         await f.generate("dialogue", question);
         assert.equal(f.frames().length, 10);
