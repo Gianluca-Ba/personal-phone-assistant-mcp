@@ -15,6 +15,7 @@ import {
   isRoutingHold,
 } from "../../../scripts/jp-backchannel.mjs";
 import { CallController } from "../../../scripts/jp-call-controller.mjs";
+import { outboundRoutingPolicy } from "../../../scripts/jp-ivr-route.mjs";
 import { PlaybackMarks } from "../../../scripts/jp-playback-marks.mjs";
 import { decodeMuLaw, MuLawEncoder } from "./audio.mjs";
 import { dialPayload, taskFingerprint, statusForEnd } from "./contract.mjs";
@@ -88,6 +89,10 @@ export class VoiceBridge {
       return json({ error: "Outbound context mismatch" }, 409);
     if (row.language !== "ja")
       return json({ error: "Only validated Japanese route is enabled" }, 409);
+    const routingPolicy = outboundRoutingPolicy({
+      destination: row.destination_number,
+      instructions: row.instructions,
+    });
     const fingerprint = taskFingerprint(row);
     if (
       existing &&
@@ -103,6 +108,7 @@ export class VoiceBridge {
         from: this.env.OUTBOUND_FROM,
         destination: row.destination_number,
         instructions: row.instructions,
+        routing_policy: routingPolicy,
         language: row.language,
         dialogue_gate_required: true,
         dialogue_candidate_observed: null,
@@ -502,6 +508,8 @@ export class VoiceBridge {
               candidate_observed: !!this.context.dialogue_candidate_observed,
               human_identity_verified: false,
             }),
+            voice_routing_policy:
+              this.context.routing_policy?.profile ?? "generic_menu",
             voice_output_audit: JSON.stringify(
               this.context.output_audit ?? {
                 completed_responses: 0,
@@ -1496,6 +1504,7 @@ export class VoiceBridge {
               outbound_language: this.context.language,
               outbound_task: composeOutboundTask(this.context.instructions, {
                 systemInitialAck: this.env.OUTBOUND_INITIAL_ACK === "true",
+                routingPolicy: this.context.routing_policy,
               }),
               outbound_request_id: this.context.request_id,
             },
@@ -1531,6 +1540,7 @@ export class VoiceBridge {
       now: this.now,
       stripCumulativeHistory: this.env.EXTERNAL_STT !== "true",
       maxRoutingHoldMs: this.routingHoldLimit(),
+      routingPolicy: this.context.routing_policy ?? null,
       playFarewell:
         this.env.CONTROLLED_FAREWELL === "true"
           ? (outcome, op) => this.playControlledFarewell(outcome, op)

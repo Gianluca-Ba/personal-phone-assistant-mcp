@@ -10,6 +10,7 @@ import {
 } from "./jp-backchannel.mjs";
 import { PlaybackClock } from "./jp-playback-clock.mjs";
 import { normalizeMenuTranscript } from "./jp-menu-text.mjs";
+import { routeConstraint } from "./jp-ivr-route.mjs";
 const digest = (text) => createHash("sha256").update(text).digest("hex");
 const normalize = normalizeMenuTranscript;
 const terminal = new Set([
@@ -163,7 +164,10 @@ export class CallController {
     playFarewell = null,
     maxHoldMs = 90000,
     maxRoutingHoldMs = 180000,
+    routingPolicy = null,
   }) {
+    routeConstraint("", routingPolicy); // Reject invalid trusted configuration.
+    this.routingPolicy = routingPolicy;
     if (!Number.isInteger(maxHoldMs) || maxHoldMs < 10000 || maxHoldMs > 90000)
       throw Error("Invalid hold limit");
     this.maxHoldMs = maxHoldMs;
@@ -695,11 +699,25 @@ export class CallController {
       if (Object.keys(args).length)
         return { ok: false, reason: "INVALID_ARGUMENTS" };
       if (!this.menuSnapshotReady()) return menuNotComplete();
+      const route = routeConstraint(this.menu.text, this.routingPolicy, {
+        used: this.depth > 0,
+      });
       return {
         ok: true,
         menu: this.menu.text,
         menu_token: this.menu.token,
         advertised_digits: this.menu.digits,
+        ...(route
+          ? {
+              route_policy: route.profile,
+              authorized_digits: route.authorized_digits,
+              required_next_digit: route.authorized_digits[0] ?? null,
+              route_reason: route.reason,
+              instruction: route.reason
+                ? "The specifically authorized other-questions route is not unambiguously offered. No digit is authorized. Do not substitute business, support or an unknown submenu."
+                : "Select only digit 5, the explicitly authorized other-questions option, with this menu_token. Never select 1, 2 or 3 for this request.",
+            }
+          : {}),
       };
     }
     if (name === "press_ivr_digit") {
@@ -743,6 +761,21 @@ export class CallController {
         return { ok: false, reason: "SENSITIVE_MENU" };
       if (!m.digits.includes(args.digits))
         return { ok: false, reason: "DIGIT_NOT_ADVERTISED" };
+      const route = routeConstraint(m.text, this.routingPolicy, {
+        used: this.depth > 0,
+      });
+      if (route && !route.authorized_digits.includes(args.digits))
+        return {
+          ok: false,
+          reason: route.reason ?? "ROUTE_OPTION_NOT_AUTHORIZED",
+          action_not_executed: true,
+          authorized_digits: route.authorized_digits,
+          next_action: route.reason
+            ? "wait_or_report_route_unavailable"
+            : "read_current_menu",
+          instruction:
+            "No digit was sent and the menu remains unused. Read the current menu; only its authorized other-questions digit 5 may be selected. Never substitute another department.",
+        };
       const key =
           m.retry && this.lastSelection?.digits === args.digits
             ? this.lastSelection.key

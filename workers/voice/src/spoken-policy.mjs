@@ -12,7 +12,10 @@ A declared store-closed, outside-business-hours, unavailable-service, wrong-numb
 Treat read_current_menu as an asynchronous observation: remain silent while it waits for the complete announcement. Use only the exact menu_token from a successful server read; never a placeholder such as MENU_TOKEN. If MENU_NOT_COMPLETE or STALE_OR_INCOMPLETE_MENU is returned, no digit was sent: silently read_current_menu again, then use its fresh exact token and the authorized advertised option. Never retry a digit whose dispatch or delivery is uncertain.
 For this guarded route, finish_call_after_goodbye requests a SYSTEM-CONTROLLED farewell and hangup. Once settled details are clear and the recipient's final speech is complete, call that tool SILENTLY with confirmed, refused, wrong_number or unable_to_proceed. Do not speak your own extra farewell before or after it, and never add a spoken summary while it is pending. The controller plays the complete farewell and terminates the line. If RECIPIENT_SPEAKING is returned, wait silently for their turn to end; do not say the reason and do not choose an unrelated digit. A new real question cancels pending closure, but a mere pause or aizuchi does not authorize a new task. Preserve unresolved matters for the backend report; a terminated line does not establish task success.`;
 
-export function composeOutboundTask(raw, { systemInitialAck = false } = {}) {
+export function composeOutboundTask(
+  raw,
+  { systemInitialAck = false, routingPolicy = null } = {},
+) {
   if (typeof raw !== "string" || !raw.trim() || raw.length > 8192)
     throw new Error("Invalid authorized outbound task");
   // JSON escaping makes the task boundary unambiguous without editing the
@@ -26,6 +29,9 @@ export function composeOutboundTask(raw, { systemInitialAck = false } = {}) {
       : OUTBOUND_SPOKEN_POLICY) +
     (systemInitialAck
       ? "\nThe media controller, not you, plays the first はい、よろしくお願いします。 after an eligible recipient greeting. Do not generate or repeat that acknowledgement. After the greeting, generate ONLY one short task question (at most one Japanese sentence), then STOP and wait. For a reservation, first ask 予約をお願いできますか。 and wait; do not bundle date, time, party size, name or a previous-call story. Provide each exact authorized detail in subsequent brief turns as requested. A pre-connection long-silence event never authorizes speech. Never say yesterday or another relative date unless it is established by the authorized absolute timestamps. The controller withholds audio until the whole response finishes: keep each reply very short.\n"
+      : "") +
+    (routingPolicy
+      ? "\nAUTHORIZED IVR ROUTE: Apple Kawasaki retail other questions. Wait for read_current_menu to return a complete menu and authorized_digits. Select ONLY the announced other-questions option 5 with its fresh exact token. NEVER select business customers (法人) 3, technical support 2, or hours/directions 1. If a different category is assigned to 5, or no authorized digit is returned, do not guess. A rejected selection has not sent a tone; read again and select only authorized 5. After a successful selection wait silently for transfer and a recipient turn. Provider long-silence events during the routing hold are expected; do not request closure solely because of them. Never speak this route directive.\n"
       : "") +
     "\n\nAUTHORIZED_TASK_JSON=" +
     JSON.stringify({ authorized_task: raw }) +
@@ -55,7 +61,7 @@ export function speechViolation(
   const text = value.normalize("NFKC");
   const tight = compact(text);
   if (
-    /(?:callsummary(?:v\d+)?|callsummaryv|conversationtranscript|pending_approval|outcome_unknown|unable_to_proceed|wrong_number|finish_call_after_goodbye|press_ivr_digit|read_current_menu|verifiednativeconsent|approval_nonce|request_digest|client_state|closure_pending|recipient_speaking|menu_not_complete|menu_not_ready|forbidden_digit|outbound_mode|outbound_task)/i.test(
+    /(?:menuivrautorizzato|ppa_ivr_route|apple_kawasaki_other_questions|callsummary(?:v\d+)?|callsummaryv|conversationtranscript|pending_approval|outcome_unknown|unable_to_proceed|wrong_number|finish_call_after_goodbye|press_ivr_digit|read_current_menu|verifiednativeconsent|approval_nonce|request_digest|client_state|closure_pending|recipient_speaking|menu_not_complete|menu_not_ready|forbidden_digit|outbound_mode|outbound_task)/i.test(
       tight,
     ) ||
     /(?:電話応答|DTMF入力|IVR遷移|取得情報|実施内容まとめ|コマンド[・/]?進捗まとめ|検証結果|通話結果のまとめ)[:：]/i.test(

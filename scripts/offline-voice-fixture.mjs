@@ -31,6 +31,8 @@ class Socket {
 export async function createOfflineVoiceFixture({
   random = () => 100,
   Bridge = VoiceBridge,
+  destination = "+81343453600",
+  instructions = "Ask the authorized product availability question; do not invent answers.",
 } = {}) {
   let at = 1793152800000;
   const network = [],
@@ -39,10 +41,9 @@ export async function createOfflineVoiceFixture({
     id: crypto.randomUUID(),
     status: "dialing",
     callback_token: crypto.randomUUID(),
-    destination_number: "+81343453600",
+    destination_number: destination,
     language: "ja",
-    instructions:
-      "Ask the authorized product availability question; do not invent answers.",
+    instructions,
   };
   const env = {
     VOICE_ORIGIN: "https://voice.example",
