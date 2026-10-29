@@ -57,3 +57,37 @@ Only the Voice Worker needs deployment. Phone/inbound, MCP, Auth, Google, Telnyx
 assistant settings, secrets, bindings and D1 remain unchanged. Private before/after
 snapshots retain the previous deployment for rollback. A real call is a separate
 owner-approved verification, never represented as already passed by virtual tests.
+
+## Live pilot and product-detail follow-up
+
+One newly created request was presented in full and received a new explicit owner
+approval before execution. The real pilot sent other-questions digit 5 once,
+entered dialogue, completed the fixed acknowledgement, and released four checked
+model responses (802,560 PCM bytes). The dual-channel recording has 17.48 seconds
+of active outgoing audio at the local RMS threshold, rather than the earlier
+silent outgoing channel. Signed events confirm the complete controlled farewell;
+carrier hangup followed its completion by approximately 0.977 seconds. The call
+lasted 121 seconds. No additional real call was initiated.
+
+The business outcome remains unresolved: storage/colour appeared in an interrupted
+generation and cannot be represented as reliably spoken; the availability answer
+was fragmented. There was no verified exact-variant stock confirmation or booking.
+The subsequent response to a restock question indicates an inability to check or
+communicate that information, but is not a reliable inventory statement about the
+requested variant. Neither model text nor these partial recognition fragments
+are treated as a confirmed commercial result.
+
+The outbound route policy now requires the complete authorized product tuple in
+a single stock question, explicitly repeating the model alongside capacity,
+colour and SIM qualification. It does not invent missing product fields. Generated
+or cancelled text is not assumed heard. Fragmentary yes/no answers require a
+short clarification before inferring stock or asking about restock. Internal
+routing/delivery headings are also rejected by the speech guard.
+
+A subsequent real-AI virtual test (all telephone/TTS effects mocked, no recordings
+uploaded) released the complete product question and, after a synthetic truncated
+answer, asked `今のご回答は「在庫がない」ということでよろしいでしょうか。`.
+It sent one simulated digit 5. An earlier virtual attempt that omitted the model
+name from the product-details question failed the strict check; the final private
+delivery check corrected that behavior. This follow-up prompt change is verified
+virtually, not claimed to have received another PSTN test.

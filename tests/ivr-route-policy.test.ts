@@ -187,11 +187,20 @@ it("makes the selected authorized route explicit and keeps internal route names 
     routingPolicy: policy,
   });
   expect(p).toContain("NEVER select business customers");
+  expect(p).toContain("together in ONE concise availability question");
+  expect(p).toContain("cancelled or generated text may not have been played");
+  expect(p).toContain("fragmentary answer is not verified yes/no availability");
   expect(p).toContain(
     "long-silence events during the routing hold are expected",
   );
   expect(p).toContain(JSON.stringify({ authorized_task: instructions }));
   expect(speechViolation(RETAIL_ROUTE_DIRECTIVE)).toBe("internal_report");
+  expect(speechViolation("PRIVATE DELIVERY CHECK FOR STOCK QUESTIONS")).toBe(
+    "internal_report",
+  );
+  expect(speechViolation("AUTHORIZED IVR ROUTE: Apple Kawasaki")).toBe(
+    "internal_report",
+  );
 });
 it.each([
   ["Verificare disponibilità iPhone Duo 256 GB per acquisto walk-in", true],
