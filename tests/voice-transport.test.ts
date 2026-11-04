@@ -1291,6 +1291,238 @@ it("never defers real instructions, changed task details or audibility checks on
   f.recipient("もしもし。");
   expect(f.b.responses.get("second").suppressed).toBe(true);
 });
+async function firstDeliveredQuestionFixture(generationChecks = false) {
+  const f = await dialogueFixture();
+  f.b.outputRate = 24000;
+  // The Yodobashi trace generated three cancelled starts before the first
+  // complete question. Generation IDs alone therefore do not identify what
+  // the recipient has actually had a chance to hear.
+  for (let n = 0; n < 3; n++) {
+    const id = `cancelled-start-${n}`;
+    await f.b.onVoice({ type: "response.created", response: { id } });
+    await f.b.onVoice({
+      type: "response.output_audio.delta",
+      response_id: id,
+      delta: Buffer.alloc(4800).toString("base64"),
+    });
+    f.advance(1000);
+    f.recipient("ご用件をお伺いします。");
+    await f.b.onVoice({
+      type: "response.done",
+      response: { id, status: "cancelled" },
+    });
+  }
+  expect(f.media.frames.some((m: any) => m.event === "media")).toBe(false);
+  await f.b.onVoice({
+    type: "response.created",
+    response: { id: "first-delivered-question" },
+  });
+  const pcm = Buffer.alloc(480000);
+  for (let i = 0; i < pcm.length / 2; i++)
+    pcm.writeInt16LE(
+      Math.round(5000 * Math.sin((2 * Math.PI * 440 * i) / 24000)),
+      i * 2,
+    );
+  await f.b.onVoice({
+    type: "response.output_audio.delta",
+    response_id: "first-delivered-question",
+    delta: pcm.toString("base64"),
+  });
+  if (generationChecks) {
+    for (let n = 0; n < 4; n++) {
+      f.advance(2500);
+      recognitionTurn(f, "もしもし。", 10 + n * 3);
+      expect(f.b.responses.get("first-delivered-question").suppressed).toBe(
+        false,
+      );
+    }
+  } else f.advance(10000);
+  expect(f.media.frames.some((m: any) => m.event === "media")).toBe(false);
+  await f.b.onVoice({
+    type: "response.output_audio_transcript.delta",
+    response_id: "first-delivered-question",
+    delta: "iPhone Duo 256GB Night SkyのSIMフリーは予約なしで購入できますか。",
+  });
+  await f.b.onVoice({
+    type: "response.done",
+    response: { id: "first-delivered-question", status: "completed" },
+  });
+  return f;
+}
+function recognitionTurn(f: any, text: string, start: number) {
+  f.b.turns.accept({ transcript: text, is_final: false, start });
+  f.b.turns.accept({
+    transcript: text,
+    is_final: true,
+    speech_final: true,
+    start,
+    duration: 0.5,
+  });
+}
+it("preserves the first undelivered question through repeated checks during its fourth generation", async () => {
+  const f = await firstDeliveredQuestionFixture(true);
+  expect(f.b.context.initial_dialogue_response.id).toBe("cancelled-start-0");
+  expect(f.b.context.deferred_audibility_checks).toBe(4);
+  expect(f.b.context.output_audit).toMatchObject({
+    released_responses: 1,
+    released_pcm_bytes: 480000,
+  });
+  expect(f.media.frames.filter((m: any) => m.event === "media")).toHaveLength(
+    500,
+  );
+});
+async function undeliveredRecoveryFixture() {
+  const f = await dialogueFixture();
+  await f.b.onVoice({ type: "response.created", response: { id: "pickup" } });
+  f.advance(1000);
+  f.recipient("ご用件をお伺いします。");
+  await f.b.onVoice({
+    type: "response.done",
+    response: { id: "pickup", status: "cancelled" },
+  });
+  return f;
+}
+it("bounds pre-delivery recovery to the original 30 seconds without renewing it on checks or generations", async () => {
+  const f = await undeliveredRecoveryFixture();
+  const first = { ...f.b.context.initial_dialogue_response };
+  f.advance(24000);
+  await f.b.onVoice({
+    type: "response.created",
+    response: { id: "late-first-question" },
+  });
+  f.advance(4000);
+  recognitionTurn(f, "もしもし。", 29);
+  expect(f.b.responses.get("late-first-question").suppressed).toBe(false);
+  expect(f.b.deferInitialBackchannel("はい。")).toBe(false);
+  expect(f.b.context.initial_dialogue_response).toEqual(first);
+  f.advance(1000);
+  recognitionTurn(f, "もしもし。", 30);
+  expect(f.b.responses.get("late-first-question").suppressed).toBe(true);
+  await f.b.onVoice({
+    type: "response.created",
+    response: { id: "after-deadline" },
+  });
+  recognitionTurn(f, "もしもし。", 31);
+  expect(f.b.responses.get("after-deadline").suppressed).toBe(true);
+  expect(f.b.context.initial_dialogue_response).toEqual(first);
+});
+it("does not extend the current generation timeout during pre-delivery recovery", async () => {
+  const f = await undeliveredRecoveryFixture();
+  await f.b.onVoice({
+    type: "response.created",
+    response: { id: "slow-first-question" },
+  });
+  f.advance(14999);
+  recognitionTurn(f, "もしもし。", 15);
+  expect(f.b.responses.get("slow-first-question").suppressed).toBe(false);
+  f.advance(1);
+  expect(f.b.deferInitialAudibilityCheck("もしもし。")).toBe(false);
+  recognitionTurn(f, "もしもし。", 16);
+  expect(f.b.responses.get("slow-first-question").suppressed).toBe(true);
+});
+it.each([
+  "ちょっと待ってください。",
+  "違います、予約を変更してください。",
+  "もしもし、在庫はありません。",
+])(
+  "still cancels an undelivered recovery for a meaningful turn: %s",
+  async (text) => {
+    const f = await undeliveredRecoveryFixture();
+    await f.b.onVoice({
+      type: "response.created",
+      response: { id: "recovering-question" },
+    });
+    f.advance(500);
+    recognitionTurn(f, text, 2);
+    expect(f.b.responses.get("recovering-question").suppressed).toBe(true);
+    expect(f.b.context.deferred_audibility_checks ?? 0).toBe(0);
+  },
+);
+it("lets the first delivered question finish after cancelled starts despite interim audibility checks", async () => {
+  const f = await firstDeliveredQuestionFixture();
+  const delivery = { ...f.b.context.initial_audio_delivery };
+  expect(delivery.id).toBe("first-delivered-question");
+  expect(delivery.deadline_at - delivery.started_at).toBe(10000);
+  expect(f.b.context.initial_dialogue_response.id).toBe("cancelled-start-0");
+  const before = f.media.frames.length;
+  f.advance(250);
+  recognitionTurn(f, "もしもし。", 30);
+  f.advance(2500);
+  recognitionTurn(f, "もしもし。", 33);
+  expect(f.b.responses.get(delivery.id).suppressed).toBe(false);
+  expect(f.b.context.deferred_audibility_checks).toBe(2);
+  expect(f.b.context.initial_audio_delivery.deadline_at).toBe(
+    delivery.deadline_at,
+  );
+  expect(
+    f.media.frames.slice(before).some((m: any) => m.event === "clear"),
+  ).toBe(false);
+  const media = f.media.frames.filter((m: any) => m.event === "media");
+  expect(media).toHaveLength(500);
+  expect(
+    media.reduce(
+      (bytes: number, m: any) =>
+        bytes + Buffer.from(m.media.payload, "base64").length,
+      0,
+    ),
+  ).toBe(80000);
+  const mark = f.media.frames.find((m: any) => m.event === "mark");
+  f.advance(7250);
+  await f.b.onMedia({ event: "mark", stream_id: "stream", mark: mark.mark });
+  expect(f.b.marks.pending.size).toBe(0);
+  expect(f.b.context.initial_audio_delivery.completed_at).toBe(
+    delivery.deadline_at,
+  );
+  expect(f.b.deferInitialAudibilityCheck("もしもし。")).toBe(false);
+  await f.generate("later-question", "次回の入荷予定は分かりますか。", 48000);
+  f.advance(100);
+  recognitionTurn(f, "もしもし。", 45);
+  expect(f.b.responses.get("later-question").suppressed).toBe(true);
+  expect(f.b.context.initial_audio_delivery.id).toBe(delivery.id);
+});
+it.each([
+  "ちょっと待ってください。",
+  "違います、予約を変更してください。",
+  "もしもし、在庫はありません。",
+  "やめてください。",
+])(
+  "still interrupts the first delivered question for a real recipient turn: %s",
+  async (text) => {
+    const f = await firstDeliveredQuestionFixture();
+    const before = f.media.frames.length;
+    f.advance(500);
+    recognitionTurn(f, text, 30);
+    expect(f.b.responses.get("first-delivered-question").suppressed).toBe(true);
+    expect(f.b.context.initial_audio_delivery.cancelled).toBe(true);
+    expect(f.b.context.deferred_audibility_checks ?? 0).toBe(0);
+    expect(
+      f.media.frames.slice(before).some((m: any) => m.event === "clear"),
+    ).toBe(true);
+    expect(f.b.deferInitialAudibilityCheck("もしもし。")).toBe(false);
+  },
+);
+it("does not renew first-delivery protection when its playback mark is missing", async () => {
+  const f = await firstDeliveredQuestionFixture();
+  const deadline = f.b.context.initial_audio_delivery.deadline_at;
+  f.advance(9000);
+  recognitionTurn(f, "もしもし。", 40);
+  expect(f.b.context.initial_audio_delivery.deadline_at).toBe(deadline);
+  f.advance(1000);
+  expect(f.b.marks.pending.size).toBe(1);
+  expect(f.b.deferInitialAudibilityCheck("もしもし。")).toBe(false);
+  recognitionTurn(f, "もしもし。", 42);
+  expect(f.b.responses.get("first-delivered-question").suppressed).toBe(true);
+  expect(f.b.context.initial_audio_delivery.cancelled).toBe(true);
+});
+it("ends first-question protection at playback completion even within the generation grace", async () => {
+  const f = await dialogueFixture();
+  await f.generate("direct-question", "予約なしで購入できますか。");
+  f.advance(100);
+  expect(f.b.deferInitialAudibilityCheck("もしもし。")).toBe(true);
+  const mark = f.media.frames.find((m: any) => m.event === "mark");
+  await f.b.onMedia({ event: "mark", stream_id: "stream", mark: mark.mark });
+  expect(f.b.deferInitialAudibilityCheck("もしもし。")).toBe(false);
+});
 it("holds audio until the complete utterance is checked, then releases every frame once", async () => {
   const f = await dialogueFixture();
   await f.b.onVoice({ type: "response.created", response: { id: "bounded" } });
@@ -2284,4 +2516,75 @@ it("permits a later genuine audibility answer after the system acknowledgement",
   f.recipient("お声は届いていますか？");
   await f.generate("later-answer", "はい、聞こえています。");
   expect(f.b.responses.get("later-answer").rendered).toBe(3200);
+});
+it("diagnoses an ended provider conversation after response cancellation and closes once through the fallback", async () => {
+  const f = await initialAckFixture();
+  await f.generate("cancelled-startup", "こんにちは。");
+  expect(f.b.voice.frames.some((m: any) => m.type === "response.cancel")).toBe(
+    true,
+  );
+  const event = {
+    type: "error",
+    error: {
+      code: "conversation_ended",
+      message: "PRIVATE provider details must not be persisted",
+    },
+  };
+  await Promise.all([f.b.onVoice(event), f.b.onVoice(event)]);
+  expect(f.b.context.failure).toBe("voice_conversation_ended");
+  expect(f.b.failing).toBe(true);
+  expect(f.b.controller.closing).toBe(true);
+  expect(f.b.voice.readyState).toBe(3);
+  expect(f.network.filter((n: any) => n.url.endsWith("/speak"))).toHaveLength(
+    1,
+  );
+  expect(f.network.some((n: any) => n.url.endsWith("/hangup"))).toBe(false);
+  expect(JSON.stringify([...f.storage.data.values()])).not.toContain("PRIVATE");
+  const completion = {
+    id: crypto.randomUUID(),
+    event_type: "call.speak.ended",
+    occurred_at: new Date(f.advance(0)).toISOString(),
+    payload: {
+      connection_id: f.env.VOICE_APP_ID,
+      call_control_id: "bound-call",
+      client_state: f.b.context.fallback_state,
+      status: "completed",
+    },
+  };
+  await Promise.all([f.b.onWebhook(completion), f.b.onWebhook(completion)]);
+  await f.b.finishFallback();
+  expect(f.network.filter((n: any) => n.url.endsWith("/hangup"))).toHaveLength(
+    1,
+  );
+  await f.b.onWebhook({
+    ...completion,
+    id: crypto.randomUUID(),
+    event_type: "call.hangup",
+  });
+  expect(f.statuses.at(-1).fields.CallStatus).toBe("failed");
+});
+it("ignores provider conversation end during an active farewell, but diagnoses it after that farewell is cancelled", async () => {
+  const f = await initialAckFixture();
+  await f.b.playControlledFarewell("unable_to_proceed", {
+    operationId: "existing-close",
+  });
+  const event = { type: "error", error: { code: "conversation_ended" } };
+  const before = f.network.length;
+  await f.b.onVoice(event);
+  expect(f.b.context.failure).toBeUndefined();
+  expect(f.b.failing).not.toBe(true);
+  expect(f.b.context.controlled_closing.cancelled).toBe(false);
+  expect(f.network).toHaveLength(before);
+  await f.b.cancelControlledFarewell();
+  await f.b.onVoice(event);
+  expect(f.b.context.failure).toBe("voice_conversation_ended");
+  expect(f.b.failing).toBe(true);
+});
+it("ignores late provider conversation end after the call is already ended", async () => {
+  const f = await initialAckFixture();
+  f.b.ended = true;
+  const before = f.network.length;
+  await f.b.onVoice({ type: "error", error: { code: "conversation_ended" } });
+  expect(f.b.context.failure).toBeUndefined();
+  expect(f.network).toHaveLength(before);
 });

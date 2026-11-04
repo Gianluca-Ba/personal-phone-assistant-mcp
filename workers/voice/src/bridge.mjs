@@ -522,6 +522,22 @@ export class VoiceBridge {
             voice_response_audit: JSON.stringify(
               this.context.response_audit ?? [],
             ),
+            ...(this.context.initial_audio_delivery
+              ? {
+                  voice_initial_audio_delivery: JSON.stringify({
+                    response_digest: sha256(
+                      this.context.initial_audio_delivery.id,
+                    ).slice(0, 16),
+                    started_at: this.context.initial_audio_delivery.started_at,
+                    deadline_at:
+                      this.context.initial_audio_delivery.deadline_at,
+                    completed_at:
+                      this.context.initial_audio_delivery.completed_at ?? null,
+                    cancelled:
+                      this.context.initial_audio_delivery.cancelled === true,
+                  }),
+                }
+              : {}),
             ...(this.context.initial_ack
               ? {
                   voice_initial_ack: JSON.stringify({
@@ -811,8 +827,49 @@ export class VoiceBridge {
       (!response.completed || response.waitingForQuiet || this.speakingOutput())
     );
   }
+  initialAudioCanContinue() {
+    const delivery = this.context.initial_audio_delivery;
+    const response = delivery && this.responses.get(delivery.id);
+    return !!(
+      delivery &&
+      !delivery.completed_at &&
+      !delivery.cancelled &&
+      delivery.id === this.controller?.responseId &&
+      this.now() < delivery.deadline_at &&
+      response?.rendered > 0 &&
+      !response.suppressed &&
+      !this.modelMustRemainSilent() &&
+      this.speakingOutput()
+    );
+  }
+  initialUndeliveredResponseCanContinue() {
+    const first = this.context.initial_dialogue_response;
+    const response = this.responses.get(this.controller?.responseId);
+    // A cancelled greeting must not make every subsequent "hello?" cancel
+    // the first real question before it can be validated. This grace belongs
+    // to the original pickup attempt, never to each new generation.
+    return !!(
+      first &&
+      this.now() - first.started_at < 30000 &&
+      (this.context.output_audit?.released_responses ?? 0) === 0 &&
+      response &&
+      !response.suppressed &&
+      !response.finalized &&
+      this.now() - response.createdAt < 15000 &&
+      !this.modelMustRemainSilent()
+    );
+  }
   deferInitialAudibilityCheck(text) {
-    return this.initialReplyCanContinue() && isAudibilityCheck(text);
+    if (!isAudibilityCheck(text)) return false;
+    if (
+      this.context.initial_audio_delivery &&
+      this.context.initial_audio_delivery.id === this.controller?.responseId
+    )
+      return this.initialAudioCanContinue();
+    return (
+      this.initialReplyCanContinue() ||
+      this.initialUndeliveredResponseCanContinue()
+    );
   }
   deferInitialBackchannel(text) {
     return !!(
@@ -828,6 +885,11 @@ export class VoiceBridge {
     this.cancelledForTurn = true;
     if (this.initialAckPending()) this.background(this.cancelInitialAck());
     const previous = this.responses.get(this.controller.responseId);
+    if (
+      this.context.initial_audio_delivery &&
+      this.context.initial_audio_delivery.id === this.controller.responseId
+    )
+      this.context.initial_audio_delivery.cancelled = true;
     if (previous) {
       previous.suppressed = true;
       previous.blockReason ??= "recipient_interruption";
@@ -1148,6 +1210,27 @@ export class VoiceBridge {
         text: response.suppressed ? "" : response.text,
         no_audio: !response.rendered,
       });
+      if (
+        !this.context.initial_audio_delivery &&
+        response.rendered > 0 &&
+        /でしょうか|ですか|ますか|[?？]/.test(response.text)
+      ) {
+        // Earlier generations may have been cancelled before any audio left
+        // the bridge. Protect this first delivered question, not their IDs.
+        // The PCM duration gives one fixed playback window; repeated hellos
+        // never extend it or protect a later question.
+        const duration = Math.min(
+          (response.rendered / (this.outputRate * 2)) * 1000,
+          this.speechLimit() * 1000,
+        );
+        this.context.initial_audio_delivery = {
+          id,
+          started_at: this.now(),
+          deadline_at: this.now() + duration,
+          completed_at: null,
+          cancelled: false,
+        };
+      }
       this.marks.commit(id, response.rendered > 0);
     }
     const audit = (this.context.output_audit ??= {
@@ -1551,6 +1634,11 @@ export class VoiceBridge {
     this.marks = new PlaybackMarks({
       sendMark: (m) => this.sendMedia(m),
       onPlayed: (responseId) => {
+        if (
+          this.context.initial_audio_delivery &&
+          this.context.initial_audio_delivery.id === responseId
+        )
+          this.context.initial_audio_delivery.completed_at = this.now();
         this.controller.event({ type: "playback_confirmed", responseId });
         this.silence.activity();
       },
@@ -2020,11 +2108,26 @@ export class VoiceBridge {
             },
           }),
         );
-    } else if (
-      frame.type === "error" &&
-      frame.error?.code !== "conversation_ended"
-    )
+    } else if (frame.type === "error") {
+      if (frame.error?.code === "conversation_ended") {
+        // A provider session ending during dialogue is a transport failure.
+        // Only a shutdown already underway makes this expected; cancelling an
+        // individual model response does not end the recipient conversation.
+        if (
+          this.failing ||
+          this.context?.terminal_at ||
+          this.context?.close_dispatched ||
+          this.controller?.closing ||
+          this.controller?.closed ||
+          (this.context?.controlled_closing &&
+            !this.context.controlled_closing.cancelled)
+        )
+          return;
+        await this.fail("voice_conversation_ended");
+        return;
+      }
       throw Error("Voice provider error");
+    }
   }
   async forwardInsight(request) {
     await this.load();
