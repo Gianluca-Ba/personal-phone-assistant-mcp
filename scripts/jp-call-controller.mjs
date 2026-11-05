@@ -12,6 +12,7 @@ import {
 import { PlaybackClock } from "./jp-playback-clock.mjs";
 import { normalizeMenuTranscript } from "./jp-menu-text.mjs";
 import { routeConstraint } from "./jp-ivr-route.mjs";
+import { holdReturnText } from "./jp-recipient-evidence.mjs";
 const digest = (text) => createHash("sha256").update(text).digest("hex");
 const normalize = normalizeMenuTranscript;
 const terminal = new Set([
@@ -166,7 +167,9 @@ export class CallController {
     maxHoldMs = 90000,
     maxRoutingHoldMs = 180000,
     routingPolicy = null,
+    unverifiedModelConfirmation = false,
   }) {
+    this.unverifiedModelConfirmation = unverifiedModelConfirmation;
     routeConstraint("", routingPolicy); // Reject invalid trusted configuration.
     this.routingPolicy = routingPolicy;
     if (!Number.isInteger(maxHoldMs) || maxHoldMs < 10000 || maxHoldMs > 90000)
@@ -399,7 +402,7 @@ export class CallController {
       if (
         (isBackchannel(text) ||
           (this.systemFarewellStarted && isClosingAcknowledgement(fragment)) ||
-          ((this.hold || this.holdExpired) && isHoldFiller(fragment))) &&
+          ((this.hold || this.holdExpired) && !holdReturnText(fragment))) &&
         this.suspendedClosing
       ) {
         this.pending = this.suspendedClosing.pending;
@@ -416,15 +419,15 @@ export class CallController {
         this.assistantQuestionPending = false;
       }
       if (!this.recipientTerminal) {
-        if (isHoldRequest(fragment))
+        if (isHoldRequest(fragment) && !holdReturnText(fragment))
           this.enterHold(at, isRoutingHold(fragment) ? "routing" : "requested");
         else if (
-          isHoldReturn(fragment) ||
-          ((this.hold || this.holdExpired) &&
-            !e.preserve_hold &&
-            !isBackchannel(fragment) &&
-            !isHoldFiller(fragment) &&
-            fragment.trim())
+          (this.hold || this.holdExpired) &&
+          holdReturnText(fragment) &&
+          (!e.preserve_hold ||
+            /もしもし|ご用件|お待たせ(?:いた)?しました|と申します/.test(
+              fragment,
+            ))
         )
           this.leaveHold();
         else if (!this.hold && !this.holdExpired && isHoldRequest(text))
@@ -840,7 +843,9 @@ export class CallController {
           ? terminalOutcome(this.recipientTerminal)
           : this.holdExpired
             ? "unable_to_proceed"
-            : args.outcome,
+            : args.outcome === "confirmed" && this.unverifiedModelConfirmation
+              ? "unspecified"
+              : args.outcome,
         operationId: this.holdExpired
           ? "hold-timeout:" + this.holdExpiry.since
           : operationId,
@@ -853,6 +858,13 @@ export class CallController {
       return {
         ok: true,
         status: "CLOSURE_PENDING_FINISH_FAREWELL_THEN_REMAIN_SILENT",
+        ...(this.unverifiedModelConfirmation
+          ? {
+              requested_outcome: args.outcome,
+              effective_outcome: this.pending.outcome,
+              confirmation: "model_claim_not_independently_verified",
+            }
+          : {}),
       };
     }
     return { ok: false, reason: "UNKNOWN_ACTION" };

@@ -8,6 +8,7 @@ import {
   isAudibilityCheck,
 } from "./turns.mjs";
 import { composeOutboundTask, speechViolation } from "./spoken-policy.mjs";
+import { holdReturnText } from "../../../scripts/jp-recipient-evidence.mjs";
 import { SilenceWatchdog } from "./silence.mjs";
 import {
   isBackchannel,
@@ -354,11 +355,12 @@ export class VoiceBridge {
       });
     return result.ok ? { ok: true } : { ok: false, reason: result.reason };
   }
-  async observeIvrProgress(text) {
+  async observeIvrProgress(text, observedEvidence = null) {
     const p = this.context.ivr_progress;
     const known = this.context.seen_recipient_digests ?? [];
     if (p && (p.state === "awaiting_transition" || this.routingWait())) {
-      const evidence = progressEvidence(p.baseline, text, known);
+      const evidence =
+        observedEvidence ?? progressEvidence(p.baseline, text, known);
       if (evidence) {
         p.state =
           evidence.kind === "human_greeting_candidate"
@@ -503,6 +505,12 @@ export class VoiceBridge {
               this.context.close_outcome ??
               this.context.controlled_closing?.outcome ??
               "unspecified",
+            ...(this.context.model_requested_outcome
+              ? {
+                  voice_model_requested_outcome:
+                    this.context.model_requested_outcome,
+                }
+              : {}),
             system_farewell_played: this.context.system_farewell_played
               ? "true"
               : "false",
@@ -526,6 +534,12 @@ export class VoiceBridge {
             }),
             voice_routing_policy:
               this.context.routing_policy?.profile ?? "generic_menu",
+            voice_hold: JSON.stringify({
+              active: !!this.controller?.hold,
+              expired: !!this.controller?.holdExpired,
+              deadline: this.controller?.hold?.deadline ?? null,
+              filtered_turns: this.context.filtered_hold_turns ?? 0,
+            }),
             voice_output_audit: JSON.stringify(
               this.context.output_audit ?? {
                 completed_responses: 0,
@@ -1505,6 +1519,7 @@ export class VoiceBridge {
         this.context.controlled_closing &&
         !this.context.controlled_closing.cancelled &&
         this.controller.holdExpired &&
+        holdReturnText(text) &&
         !isBackchannel(text) &&
         !this.closingAcknowledgement(text)
       )
@@ -1531,10 +1546,25 @@ export class VoiceBridge {
     this.controller.routingHoldAudioOnly = false;
     if (this.context.stt_observations && /[五5].{0,6}押してください/.test(text))
       this.context.stt_observations.delivered_five++;
+    const wasHeld = !!(this.controller.hold || this.controller.holdExpired);
+    const returnedText = wasHeld ? holdReturnText(text) : text;
     const holdFiller = this.currentHoldFiller(text);
     const p = this.context.ivr_progress;
-    const evidence = p ? progressEvidence(p.baseline, text) : null;
-    const dialogueEvidence = evidence ?? progressEvidence("", text);
+    const evidenceText = returnedText ?? text;
+    const evidence =
+      p && (!wasHeld || returnedText)
+        ? (progressEvidence(p.baseline, evidenceText) ??
+          (wasHeld && returnedText
+            ? {
+                kind: "human_greeting_candidate",
+                digest: sha256(menuText(returnedText)),
+              }
+            : null))
+        : null;
+    const dialogueEvidence =
+      !wasHeld || returnedText
+        ? (evidence ?? progressEvidence("", evidenceText))
+        : null;
     if (dialogueEvidence?.kind === "human_greeting_candidate")
       this.context.dialogue_candidate_observed = {
         at: this.now(),
@@ -1555,9 +1585,13 @@ export class VoiceBridge {
     const listening =
       turn.kind === "backchannel" ||
       this.closingAcknowledgement(text) ||
+      (wasHeld && !returnedText && !this.controller.recipientTerminal) ||
       holdFiller ||
       deferredCheck ||
       this.deferInitialBackchannel(text);
+    if (wasHeld && !returnedText)
+      this.context.filtered_hold_turns =
+        (this.context.filtered_hold_turns ?? 0) + 1;
     if (deferredCheck)
       this.context.deferred_audibility_checks =
         (this.context.deferred_audibility_checks ?? 0) + 1;
@@ -1586,7 +1620,8 @@ export class VoiceBridge {
         this.controller.responseActive)
     )
       this.cancelOutput();
-    this.background(this.observeIvrProgress(text));
+    if (!wasHeld || returnedText || isRoutingHold(text))
+      this.background(this.observeIvrProgress(evidenceText, evidence));
     this.context.filtered_aizuchi =
       (this.context.filtered_aizuchi ?? 0) + (listening ? 1 : 0);
     this.turnOpen = false;
@@ -1604,7 +1639,7 @@ export class VoiceBridge {
           item: {
             type: "message",
             role: "user",
-            content: [{ type: "input_text", text }],
+            content: [{ type: "input_text", text: returnedText ?? text }],
           },
         }),
       );
@@ -1688,6 +1723,7 @@ export class VoiceBridge {
   async attachMedia(socket) {
     this.media = socket;
     this.controller = new CallController({
+      unverifiedModelConfirmation: true,
       now: this.now,
       stripCumulativeHistory: this.env.EXTERNAL_STT !== "true",
       maxRoutingHoldMs: this.routingHoldLimit(),
@@ -1737,6 +1773,10 @@ export class VoiceBridge {
           if (
             this.overlapped &&
             !this.currentHoldFiller(text) &&
+            !(
+              (this.controller.hold || this.controller.holdExpired) &&
+              !holdReturnText(text)
+            ) &&
             genuineInterruption(text) &&
             !this.closingAcknowledgement(text) &&
             !this.deferInitialAudibilityCheck(text)
@@ -2139,6 +2179,8 @@ export class VoiceBridge {
       }
       if (frame.item.name === "finish_call_after_goodbye" && !result.ok)
         this.context.controlled_close_requested = false;
+      if (frame.item.name === "finish_call_after_goodbye" && result.ok)
+        this.context.model_requested_outcome = args.outcome;
       if (
         frame.item.name === "finish_call_after_goodbye" &&
         result.ok &&

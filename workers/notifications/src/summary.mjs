@@ -1,4 +1,8 @@
 import { z } from "zod";
+import {
+  outcomeSources,
+  hasAffirmativeStock,
+} from "../../../scripts/jp-recipient-evidence.mjs";
 function failure(name) {
   const error = new Error(name);
   error.name = name;
@@ -195,15 +199,45 @@ function unresolvedExtraction(x, { silent = false } = {}) {
     uncertainties: [],
   };
 }
-export function validateExtraction(raw, sources) {
+export function validateExtraction(raw, sources, { outbound = true } = {}) {
   const x = Extraction.parse(raw);
+  const eligible = outbound ? outcomeSources(sources) : null;
+  const outcomeGrounded = (refs) =>
+    grounded(refs, sources, true) &&
+    (!eligible ||
+      refs.every((e) => eligible.get(e.source_id)?.includes(e.quote)));
+  const claims = [
+    x.title_it,
+    x.summary_it,
+    ...x.confirmed_facts.map((c) => c.text_it),
+  ].join(" ");
+  const claimsPositiveStock =
+    /disponibil(?:ità|ita).{0,24}confermat|(?:è|risulta|sono|ha confermato.{0,15})\s+(?:attualmente\s+)?disponibil[ei]|(?:prodotto|modello|articolo).{0,30}(?:acquistabile|in stock)/i.test(
+      claims,
+    );
+  const claimsWalkIn =
+    /possibilità di acquist.{0,80}senza (?:prenotazione|ordine)|(?:si può|possibile) acquist.{0,80}senza (?:prenotazione|ordine)|(?:prenotazione|ordine).{0,15}non (?:è|sono) necessar/i.test(
+      claims,
+    );
   const words = x.summary_it.split(/\s+/).length;
   if (words < 40 || words > 70) throw failure("SummaryLengthFailure");
   if (
-    !grounded(x.outcome_evidence, sources, true) ||
+    !outcomeGrounded(x.outcome_evidence) ||
+    (outbound &&
+      claimsPositiveStock &&
+      !x.outcome_evidence.some((e) =>
+        hasAffirmativeStock(eligible.get(e.source_id) ?? ""),
+      )) ||
+    (outbound &&
+      claimsWalkIn &&
+      !x.outcome_evidence.some((e) =>
+        /予約(?:なし|不要|は不要|は必要ありません|しなくて)|予約.{0,12}必要.{0,5}(?:ない|ありません)/.test(
+          eligible.get(e.source_id) ?? "",
+        ),
+      )) ||
     x.outcome_evidence.every((e) => greetingOnly(e.quote)) ||
     (/(?:prenotazion[ei]|appuntamento).{0,30}(?:confermat|effettuat|fissat)/i.test(
-      x.title_it,
+      outbound ? claims : x.title_it,
     ) &&
       !x.outcome_evidence.some((e) =>
         /(?:予約|お席).{0,30}(?:承りました|承っております|確定しました|お取りしました|お取りいたしました)|(?:reservation|appointment|booking).{0,30}(?:is confirmed|confirmed|booked)|(?:confermo|confermata|confermato).{0,30}(?:prenotazione|appuntamento)/i.test(
@@ -227,7 +261,9 @@ export function validateExtraction(raw, sources) {
     x.counterpart = null;
   for (const field of ["confirmed_facts", "uncertainties"])
     x[field] = x[field].filter((c) =>
-      grounded(c.evidence, sources, field === "confirmed_facts"),
+      field === "confirmed_facts" && outbound
+        ? outcomeGrounded(c.evidence)
+        : grounded(c.evidence, sources, field === "confirmed_facts"),
     );
   if (x.next_action && !grounded(x.next_action.evidence, sources, true))
     x.next_action = null;
@@ -363,6 +399,7 @@ export async function buildSummary(row, messages, options = {}) {
           },
         ),
         extractionSources,
+        { outbound },
       );
     try {
       x = await extract();

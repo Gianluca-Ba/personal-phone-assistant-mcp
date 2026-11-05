@@ -1918,7 +1918,7 @@ it("never treats a conditional menu label as a routing hold, and repeated transf
   expect(f.b.controller.pending?.outcome).toBe("unable_to_proceed");
   expect(f.b.context.ivr_progress.state).not.toBe("dialogue_candidate");
 });
-it("releases a routing hold for the recorded direct staff greeting and permits a short response", async () => {
+it("keeps a bare welcome on routing hold until an interactive staff return", async () => {
   const f = await dialogueFixture();
   f.b.context.ivr_progress = {
     state: "awaiting_transition",
@@ -1929,6 +1929,8 @@ it("releases a routing hold for the recorded direct staff greeting and permits a
   f.recipient(
     "お電話を転送しております。お電話ありがとうございます。アップル川崎です。",
   );
+  expect(f.b.controller.hold).not.toBeNull();
+  f.recipient("もしもし。ご用件をお伺いします。");
   expect(f.b.controller.hold).toBeNull();
   expect(f.b.context.ivr_progress.state).toBe("dialogue_candidate");
   await f.generate("answer-staff", "在庫について伺いたいのですが。");

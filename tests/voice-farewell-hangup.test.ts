@@ -107,7 +107,9 @@ it.each(["confirmed", "refused", "wrong_number", "unable_to_proceed"])(
     expect(actions(f, "playback_stop")).toHaveLength(0);
     expect(actions(f, "speak")).toHaveLength(1);
     expect(actions(f, "hangup")).toHaveLength(1);
-    expect(f.b.context.close_outcome).toBe(outcome);
+    expect(f.b.context.close_outcome).toBe(
+      outcome === "confirmed" ? "unspecified" : outcome,
+    );
   },
 );
 

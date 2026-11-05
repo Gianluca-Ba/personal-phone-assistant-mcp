@@ -104,7 +104,10 @@ try {
             f.b.activity.active = false;
             await check(f);
             const expected =
-              ["steady", "aizuchi", "audibility"].includes(mode) && tail < 2000;
+              // A bare recorded welcome (g=4) no longer releases routing hold.
+              g !== 4 &&
+              ["steady", "aizuchi", "audibility"].includes(mode) &&
+              tail < 2000;
             assert.equal(f.frames().length, expected ? 10 : 0);
             assert.equal(
               f.b.context.output_audit.released_responses,
