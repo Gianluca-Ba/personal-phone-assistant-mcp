@@ -2,7 +2,7 @@ import { afterEach, expect, it } from "vitest";
 const { createOfflineVoiceFixture } = await import(
   new URL("../scripts/offline-voice-fixture.mjs", import.meta.url).href
 );
-const { isClosingAcknowledgement } = await import(
+const { isClosingAcknowledgement, isHoldRequest } = await import(
   new URL("../scripts/jp-backchannel.mjs", import.meta.url).href
 );
 const fixtures: any[] = [];
@@ -11,6 +11,49 @@ afterEach(async () => {
 });
 const actions = (f: any, action: string) =>
   f.network.filter((n: any) => n.url.endsWith("/" + action));
+
+it.each([
+  "ちょっと確認します、お待ちくださ",
+  "少々お待ちくいませ。",
+  "待ってくださ。",
+])(
+  "blocks the observed premature closure for an ASR-truncated waiting request: %s",
+  async (text) => {
+    const f = await createOfflineVoiceFixture();
+    fixtures.push(f);
+    await f.recipient("もしもし。ご用件をお伺いします。");
+    await f.recipient(text);
+    expect(f.b.controller.hold).not.toBeNull();
+    const deadline = f.b.controller.hold.deadline;
+    f.advance(13000);
+    const result = await f.b.controller.command(
+      "premature-model-close",
+      "finish_call_after_goodbye",
+      { outcome: "unable_to_proceed" },
+    );
+    expect(result).toEqual({ ok: false, reason: "HOLD_OR_QUESTION_PENDING" });
+    await f.b.checkDialogue();
+    expect(actions(f, "speak")).toHaveLength(0);
+    expect(actions(f, "hangup")).toHaveLength(0);
+    await f.recipient(text);
+    expect(f.b.controller.hold.deadline).toBe(deadline);
+    await f.recipient("お待たせしました。在庫はありません。");
+    expect(f.b.controller.hold).toBeNull();
+    f.advance(800);
+    await f.generate("restock-question", "次回の入荷予定は分かりますか。");
+    expect(f.frames().length).toBeGreaterThan(0);
+  },
+);
+it("does not infer a new truncated hold from a quotation, negation or unrelated word", () => {
+  for (const text of [
+    "『お待ちくださ』という録音です。",
+    "お待ちくださらなくても結構です。",
+    "お待ちくださる必要はありません。",
+    "確認は不要です。",
+    "お待ちくださ？",
+  ])
+    expect(isHoldRequest(text), text).toBe(false);
+});
 async function closing(outcome = "unable_to_proceed") {
   const f = await createOfflineVoiceFixture();
   fixtures.push(f);

@@ -62,8 +62,18 @@ export const isHoldRequest = (text) => {
   const value = normalizeJapaneseTurn(text);
   const implicit =
     !/[「」『』“”"]/.test(value) && verificationPause.test(value);
+  // Observed Nova finals can lose the last い or corrupt くださいませ.
+  // Preserve a bounded requested hold, never infer task completion from it.
+  const incompleteWait =
+    !/[「」『』“”"]/.test(value) &&
+    /(?:お待ち|待って)くださ[。、.!！\s]*$|^少々お待ちくいませ[。、.!！\s]*$/.test(
+      value,
+    );
   return (
-    (holdRequest.test(value) || implicit || isRoutingHold(value)) &&
+    (holdRequest.test(value) ||
+      implicit ||
+      incompleteWait ||
+      isRoutingHold(value)) &&
     !holdNegation.test(value)
   );
 };
