@@ -3,6 +3,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   isBackchannel,
+  isClosingAcknowledgement,
   isHoldRequest,
   isHoldReturn,
   isHoldFiller,
@@ -209,6 +210,7 @@ export class CallController {
     this.depth = 0;
     this.menu = null;
     this.speaking = false;
+    this.recipientAudioActive = false;
     this.lastSpeechEnd = null;
     this.pending = null;
     this.farewell = null;
@@ -216,9 +218,10 @@ export class CallController {
     this.assistantQuestionPending = false;
     this.closed = false;
     this.closing = false;
+    this.closeGuardPending = false;
   }
   event(e) {
-    if (this.closed || this.closing) return;
+    if (this.closed || (this.closing && !this.closeGuardPending)) return;
     const at = this.now();
     if (e.type === "recipient_hold") this.enterHold(at);
     if (e.type === "recipient_return") this.leaveHold();
@@ -395,6 +398,7 @@ export class CallController {
       const previousMenu = this.menu;
       if (
         (isBackchannel(text) ||
+          (this.systemFarewellStarted && isClosingAcknowledgement(fragment)) ||
           ((this.hold || this.holdExpired) && isHoldFiller(fragment))) &&
         this.suspendedClosing
       ) {
@@ -966,6 +970,7 @@ export class CallController {
       this.closed ||
       this.closing ||
       (this.speaking && !staleRoutingAudio) ||
+      (this.recipientAudioActive && !staleRoutingAudio) ||
       this.selectionWaiters.length > 0 ||
       (at < this.acousticGuardUntil && !staleRoutingAudio) ||
       (this.requirePlaybackAck && !this.playbackAck) ||
@@ -995,15 +1000,24 @@ export class CallController {
       return false;
     }
     this.closing = true;
+    this.closeGuardPending = true;
+    let deferred = false;
     try {
-      await this.close(this.pending.outcome, {
+      const result = await this.close(this.pending.outcome, {
         operationId: this.pending.operationId ?? "farewell:" + this.responseId,
       });
+      if (result === false) {
+        // The adapter proved no carrier command was sent. New recipient audio
+        // can suspend/cancel closing while its local reservation is in flight.
+        deferred = true;
+        this.closing = false;
+        return false;
+      }
       this.closed = true;
       return true;
     } finally {
-      this.pending =
-        null; /* unknown close result is not automatically retried */
+      this.closeGuardPending = false;
+      if (!deferred) this.pending = null; // An uncertain dispatch must never be retried.
     }
   }
 }

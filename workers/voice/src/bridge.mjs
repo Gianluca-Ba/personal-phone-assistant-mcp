@@ -11,6 +11,7 @@ import { composeOutboundTask, speechViolation } from "./spoken-policy.mjs";
 import { SilenceWatchdog } from "./silence.mjs";
 import {
   isBackchannel,
+  isClosingAcknowledgement,
   isHoldFiller,
   isRoutingHold,
 } from "../../../scripts/jp-backchannel.mjs";
@@ -222,7 +223,7 @@ export class VoiceBridge {
       .run();
     await this.bindConversation();
   }
-  async voiceAPI(action, body, operation) {
+  async voiceAPI(action, body, operation, permitted = () => true) {
     if (
       !["send_dtmf", "hangup", "speak", "playback_stop"].includes(action) ||
       !this.context?.call_id
@@ -235,7 +236,11 @@ export class VoiceBridge {
     );
     const reservation = await this.storage.transaction(async (tx) => {
       const old = await tx.get(key);
-      if (old) return { old };
+      if (
+        old &&
+        (old.input !== input || old.result?.reason !== "DISPATCH_DEFERRED")
+      )
+        return { old };
       await tx.put(key, { reserved: true, command_id, input });
       return { created: true };
     });
@@ -247,6 +252,17 @@ export class VoiceBridge {
             reason: "DISPATCH_UNCONFIRMED",
           });
     let result;
+    if (!permitted()) {
+      // Only a locally denied command can be reserved again. Provider errors
+      // and uncertain network outcomes retain their original one-shot lease.
+      result = {
+        ok: false,
+        reason: "DISPATCH_DEFERRED",
+        action_not_executed: true,
+      };
+      await this.storage.put(key, { command_id, input, result });
+      return result;
+    }
     try {
       const r = await this.providerFetch(
         "https://api.telnyx.com/v2/calls/" +
@@ -606,10 +622,51 @@ export class VoiceBridge {
     await this.persist();
   }
   async terminate(outcome, operation) {
+    const c = this.controller;
+    const guarded = c?.closeGuardPending === true;
+    const pending = c?.pending;
     this.context.close_outcome = outcome;
     this.observeClosurePhase("hangup_requested");
     await this.persist();
-    const result = await this.voiceAPI("hangup", {}, operation);
+    const result = await this.voiceAPI("hangup", {}, operation, () => {
+      if (!guarded) return true;
+      const now = this.now();
+      const staleRoutingAudio =
+        pending?.reason === "hold_timeout" &&
+        c.holdExpiry?.kind === "routing" &&
+        c.routingHoldAudioOnly === true &&
+        this.routingWait() &&
+        this.recipientInterim?.waitOnly &&
+        now - this.recipientInterim.changedAt >= 5000;
+      if (
+        this.ended ||
+        this.failing ||
+        c.pending !== pending ||
+        !pending ||
+        (!staleRoutingAudio &&
+          (c.speaking ||
+            this.turnOpen ||
+            this.activity?.active ||
+            now < c.acousticGuardUntil ||
+            c.lastSpeechEnd === null ||
+            now - c.lastSpeechEnd < 750)) ||
+        !c.farewell ||
+        now - c.farewell.at < 250 ||
+        c.responseActive ||
+        c.assistantQuestionPending ||
+        c.closingBlocked ||
+        this.marks.pending.size ||
+        c.playback.remaining(now) > 0 ||
+        (this.context.controlled_closing &&
+          (!this.context.controlled_closing.completed ||
+            this.context.controlled_closing.cancelled))
+      )
+        return false;
+      // No await separates this final check from the network dispatch.
+      c.closeGuardPending = false;
+      return true;
+    });
+    if (result.reason === "DISPATCH_DEFERRED") return false;
     if (!result.ok) throw Error("Hangup unconfirmed");
     this.observeClosurePhase("hangup_accepted");
     this.ended = true;
@@ -1400,6 +1457,7 @@ export class VoiceBridge {
       if (action === "check") await this.playAttention();
       if (action === "close")
         this.requestControlledStop("recipient_silence_timeout");
+      c.recipientAudioActive = !!this.activity?.active;
       await c.tick();
     } finally {
       this.dialogueBusy = false;
@@ -1447,7 +1505,8 @@ export class VoiceBridge {
         this.context.controlled_closing &&
         !this.context.controlled_closing.cancelled &&
         this.controller.holdExpired &&
-        !isBackchannel(text)
+        !isBackchannel(text) &&
+        !this.closingAcknowledgement(text)
       )
         this.background(this.cancelControlledFarewell());
     }
@@ -1456,6 +1515,14 @@ export class VoiceBridge {
     return !!(
       (this.controller?.hold || this.controller?.holdExpired) &&
       isHoldFiller(text)
+    );
+  }
+  closingAcknowledgement(text) {
+    return !!(
+      this.context.controlled_closing &&
+      !this.context.controlled_closing.cancelled &&
+      this.controller?.systemFarewellStarted &&
+      isClosingAcknowledgement(text)
     );
   }
   deliverTranscript(text) {
@@ -1487,6 +1554,7 @@ export class VoiceBridge {
     const deferredCheck = this.deferInitialAudibilityCheck(text);
     const listening =
       turn.kind === "backchannel" ||
+      this.closingAcknowledgement(text) ||
       holdFiller ||
       deferredCheck ||
       this.deferInitialBackchannel(text);
@@ -1670,6 +1738,7 @@ export class VoiceBridge {
             this.overlapped &&
             !this.currentHoldFiller(text) &&
             genuineInterruption(text) &&
+            !this.closingAcknowledgement(text) &&
             !this.deferInitialAudibilityCheck(text)
           )
             this.cancelOutput();
@@ -2275,14 +2344,15 @@ export class VoiceBridge {
       event.event_type === "call.speak.ended" &&
       this.context.controlled_closing?.state === payload.client_state &&
       !this.context.controlled_closing.cancelled &&
+      !this.context.controlled_closing.completed &&
       payload.status === "completed"
     ) {
       this.context.system_farewell_played = true;
       this.context.controlled_closing.completed = true;
       this.observeClosurePhase("farewell_completed");
       clearTimeout(this.controlledFarewellDeadline);
-      await this.persist();
       this.controller?.event({ type: "system_farewell_completed" });
+      await this.persist();
     } else if (
       event.event_type === "call.speak.ended" &&
       this.context.fallback_state &&
