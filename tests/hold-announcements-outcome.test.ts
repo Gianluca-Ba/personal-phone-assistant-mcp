@@ -152,6 +152,11 @@ it("records a model confirmation separately from the effective unverified closur
   const f = await createOfflineVoiceFixture();
   fixtures.push(f);
   await f.recipient("もしもし。");
+  f.advance(800);
+  await f.generate("stock-question", "在庫はありますか。");
+  f.advance(250);
+  for (const name of [...f.b.marks.pending.keys()]) f.b.marks.acknowledge(name);
+  await f.recipient("在庫はございます。");
   f.advance(1000);
   await f.b.onVoice({
     type: "conversation.item.created",

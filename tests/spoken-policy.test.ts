@@ -134,3 +134,86 @@ it("replaces the model's first acknowledgement rule when the system owns pickup,
   expect(p).toContain("do not bundle date, time, party size, name");
   expect(p).toContain(JSON.stringify({ authorized_task: task }));
 });
+
+it.each([false, true])(
+  "keeps rescheduling distinct from a new booking and preserves every authorized limit (system pickup: %s)",
+  (systemInitialAck) => {
+    const task =
+      "Move the existing appointment on 2026-11-13 at 16:00 Asia/Tokyo. " +
+      "First try 2026-11-14, then 2026-11-18 before 10:00. " +
+      "Keep the old booking if no replacement is accepted. " +
+      "Collect two alternatives; do not book outside these windows.";
+    const policy = composeOutboundTask(task, { systemInitialAck });
+    const taskLines = policy
+      .split("\n")
+      .filter((line: string) => line.startsWith("AUTHORIZED_TASK_JSON="));
+    expect(taskLines).toHaveLength(1);
+    expect(
+      JSON.parse(taskLines[0].slice("AUTHORIZED_TASK_JSON=".length)),
+    ).toEqual({ authorized_task: task });
+    expect(policy).toContain("CURRENT appointment");
+    expect(policy).toContain("full absolute calendar date and time");
+    expect(policy).toContain(
+      "explicit recipient confirmation that the replacement has been accepted",
+    );
+    expect(policy).toContain("do not cancel it separately");
+    expect(policy).toContain(
+      "A long-silence event never supplies the missing answer",
+    );
+    if (systemInitialAck) {
+      expect(policy).toContain("For a new reservation, first ask");
+      expect(policy).toContain("first ask 予約の変更をお願いできますか。");
+      expect(policy).not.toContain("For a reservation, first ask");
+    }
+  },
+);
+
+it("allows short identification, date clarification and exact replacement questions as separate spoken turns", () => {
+  for (const text of [
+    "予約の変更をお願いできますか。",
+    "田中の11月13日16時の予約です。",
+    "11月14日の午前中に空きはありますか。",
+    "16時は何月何日のことでしょうか。",
+    "今の16時は、変更前の予約時刻のことでしょうか。",
+    "11月13日16時の予約を、11月14日9時半に変更していただけますか。",
+    "11月14日9時半への変更は確定しましたか。",
+    "元の予約はそのままで、候補の日時を教えていただけますか。",
+  ])
+    expect(speechViolation(text), text).toBeNull();
+  // A valid exact-date readback must not bypass the one-question turn boundary.
+  expect(
+    speechViolation(
+      "11月14日9時半に空きはありますか。その日時に変更していただけますか。",
+    ),
+  ).toBe("multiple_questions");
+});
+
+it("keeps closure-rejection diagnostics out of speech without rejecting a recipient-facing clarification", () => {
+  for (const text of [
+    "AWAITING_RECIPIENT_ANSWER",
+    "ＨＯＬＤ＿ＯＲ＿ＱＵＥＳＴＩＯＮ＿ＰＥＮＤＩＮＧ",
+    "A W A I T I N G _ R E C I P I E N T _ A N S W E Rのため待ちます。",
+    "ありがとうございます。HOLD_OR_QUESTION_PENDINGです。",
+    "RECIPIENT_CONFIRMATION_NOT_OBSERVED_AFTER_PLAYBACK",
+    "latest_request_deliveryはnot_releasedです。",
+  ])
+    expect(speechViolation(text), text).toBe("internal_report");
+  expect(speechViolation("変更後の日時を確認していただけますか。")).toBeNull();
+});
+
+it("leaves unrelated authorized tasks intact while retaining stock and general dialogue behavior", () => {
+  for (const task of [
+    "Ask the store's opening time; do not make a booking.",
+    "Ask whether the exact authorized phone is available; no purchase.",
+    "Make a new dinner reservation for two at 18:45; no payment.",
+  ]) {
+    const policy = composeOutboundTask(task, { systemInitialAck: true });
+    expect(policy).toContain(JSON.stringify({ authorized_task: task }));
+    expect(policy).toContain("For an authorized appointment change");
+    expect(policy).toContain("For a stock enquiry");
+    expect(policy).toContain("For a new reservation");
+    expect(policy).toContain(
+      "do not authorize another call, payment, booking or disclosure",
+    );
+  }
+});

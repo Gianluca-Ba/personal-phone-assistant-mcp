@@ -1755,7 +1755,7 @@ it("a real question before farewell dispatch cancels pending closure and permits
     item: {
       type: "function_call",
       name: "finish_call_after_goodbye",
-      arguments: '{"outcome":"confirmed"}',
+      arguments: '{"outcome":"unable_to_proceed"}',
       call_id: "premature-close",
     },
   });
@@ -1766,6 +1766,235 @@ it("a real question before farewell dispatch cancels pending closure and permits
   await f.generate("identity", "自動音声の電話アシスタントです。");
   expect(f.media.frames.some((m: any) => m.event === "media")).toBe(true);
   expect(f.network.some((n: any) => n.url.endsWith("/hangup"))).toBe(false);
+});
+async function modelFinish(f: any, id: string, outcome = "confirmed") {
+  await f.b.onVoice({
+    type: "conversation.item.created",
+    item: {
+      type: "function_call",
+      name: "finish_call_after_goodbye",
+      arguments: JSON.stringify({ outcome }),
+      call_id: id,
+    },
+  });
+  const output = f.b.voice.frames.find((m: any) => m.item?.call_id === id);
+  return JSON.parse(output.item.output);
+}
+async function playedResponse(f: any, id: string, duration = 200) {
+  f.advance(duration);
+  await f.b.onMedia({
+    event: "mark",
+    stream_id: "stream",
+    mark: { name: f.b.marks.byResponse.get(id) },
+  });
+}
+it("rejects the dentist's premature confirmed closure after a dropped date question and an unanswered played request", async () => {
+  const f = await dialogueFixture();
+  f.b.outputRate = 24000;
+  f.recipient("はい、お電話歯科でございます。");
+  await f.generate(
+    "original-appointment",
+    "今日11月13日16時の予約を、別の日に変更できますか。",
+    418560,
+  );
+  await playedResponse(f, "original-appointment", 8720);
+  f.advance(2000);
+  f.b.activity.active = true;
+  await f.generate(
+    "unplayed-new-date",
+    "明日11月14日で空いているお時間はございますか。",
+    245760,
+  );
+  f.advance(2042);
+  f.b.flushBufferedResponses();
+  f.b.activity.active = false;
+  expect(f.b.responses.get("unplayed-new-date").rendered).toBe(0);
+  expect(
+    (await modelFinish(f, "unplayed-finish")).latest_request_delivery,
+  ).toBe("not_released");
+  f.recipient("十六時ですね。");
+  await f.generate(
+    "unanswered-change",
+    "その16時で予約を変更していただけますか。",
+    180480,
+  );
+  await playedResponse(f, "unanswered-change", 3760);
+  f.advance(10000);
+  const result = await modelFinish(f, "dentist-premature-finish");
+  expect(result).toMatchObject({
+    ok: false,
+    reason: "RECIPIENT_CONFIRMATION_NOT_OBSERVED_AFTER_PLAYBACK",
+    latest_request_delivery: "played_without_substantive_answer",
+    action_not_executed: true,
+  });
+  expect(f.b.context.controlled_close_requested).toBe(false);
+  expect(f.b.controller.pending).toBeNull();
+  expect(f.b.context.latest_task_request.recipient_answer_at).toBeNull();
+  expect(f.network.some((n: any) => /\/(?:speak|hangup)$/.test(n.url))).toBe(
+    false,
+  );
+});
+it("never treats greetings, silence, audio without a transcript, or plain acknowledgements as task confirmation", async () => {
+  const f = await dialogueFixture();
+  f.recipient("はい、歯科でございます。");
+  expect((await modelFinish(f, "greeting-only")).latest_request_delivery).toBe(
+    "no_request_observed",
+  );
+  await f.generate("change", "11月14日16時に変更をお願いできますか。");
+  await playedResponse(f, "change");
+  recognitionTurn(f, "はい。", 1);
+  recognitionTurn(f, "もしもし。", 2);
+  recognitionTurn(f, "はい、ありがとうございます。", 2.5);
+  recognitionTurn(f, "今日この16時が難しいですかね、いらっしゃるのが。", 3);
+  f.b.turns.accept({ type: "TurnInfo", turn_index: 3, event: "StartOfTurn" });
+  f.b.turns.accept({ type: "TurnInfo", turn_index: 3, event: "EndOfTurn" });
+  f.advance(10000);
+  expect(f.b.controller.assistantQuestionPending).toBe(false);
+  expect((await modelFinish(f, "no-substantive-answer")).ok).toBe(false);
+  expect(f.b.context.latest_task_request.recipient_answer_at).toBeNull();
+  expect(f.network.some((n: any) => n.url.endsWith("/hangup"))).toBe(false);
+});
+it("does not accept an answer turn that started before playback completed, or a cleared playback mark", async () => {
+  const f = await dialogueFixture();
+  await f.generate("overlap", "11月14日16時に変更できますか。");
+  f.b.beginTurn();
+  await playedResponse(f, "overlap");
+  f.b.deliverTranscript("はい、11月14日16時に変更しました。");
+  expect((await modelFinish(f, "old-turn")).ok).toBe(false);
+  await f.generate("interrupted", "11月14日16時に変更をお願いします。");
+  const mark = f.b.marks.byResponse.get("interrupted");
+  recognitionTurn(f, "すみません、もう一度お願いします。", 2);
+  await f.b.onMedia({
+    event: "mark",
+    stream_id: "stream",
+    mark: { name: mark },
+  });
+  expect(
+    (await modelFinish(f, "interrupted-turn")).latest_request_delivery,
+  ).toBe("interrupted");
+});
+it("accepts a substantive new answer after an imperative request played without promoting it to verified success", async () => {
+  const f = await dialogueFixture();
+  f.recipient("十六時ですね。");
+  await f.generate(
+    "change-imperative",
+    "11月14日16時への予約変更をお願いします。",
+  );
+  expect(
+    (await modelFinish(f, "before-playback")).latest_request_delivery,
+  ).toBe("playback_pending");
+  await playedResponse(f, "change-imperative");
+  f.recipient("はい、11月14日16時に変更しました。");
+  expect(await modelFinish(f, "answered-change")).toMatchObject({
+    ok: true,
+    effective_outcome: "unspecified",
+    confirmation: "model_claim_not_independently_verified",
+  });
+  expect(f.b.context.latest_task_request.recipient_answer_at).toBeTruthy();
+  expect(f.b.context.output_audit.recipient_reception_proven).toBe(false);
+});
+it("cannot bypass waiting for an unanswered imperative by retrying with a different model outcome", async () => {
+  const f = await dialogueFixture();
+  await f.generate(
+    "change-imperative",
+    "11月14日16時への予約変更をお願いします。",
+  );
+  await playedResponse(f, "change-imperative", 250);
+  expect(f.b.controller.assistantQuestionPending).toBe(false);
+  for (const outcome of [
+    "confirmed",
+    "unable_to_proceed",
+    "refused",
+    "wrong_number",
+  ]) {
+    expect(await modelFinish(f, "retry-" + outcome, outcome)).toMatchObject({
+      ok: false,
+      reason: "RECIPIENT_CONFIRMATION_NOT_OBSERVED_AFTER_PLAYBACK",
+      latest_request_delivery: "played_without_substantive_answer",
+      action_not_executed: true,
+    });
+    expect(f.b.controller.pending).toBeNull();
+    expect(f.b.context.controlled_close_requested).toBe(false);
+  }
+  expect(f.b.context.latest_task_request.recipient_answer_at).toBeNull();
+  expect(f.network.some((n: any) => /\/(?:speak|hangup)$/.test(n.url))).toBe(
+    false,
+  );
+});
+it("does not let an old answered request confirm a newer unplayed request", async () => {
+  const f = await dialogueFixture();
+  await f.generate("availability", "明日空いていますか。");
+  await playedResponse(f, "availability");
+  f.recipient("11月14日16時が空いています。");
+  f.b.activity.active = true;
+  await f.generate("unplayed-booking", "11月14日16時に変更をお願いします。");
+  f.advance(2100);
+  f.b.flushBufferedResponses();
+  f.b.activity.active = false;
+  expect((await modelFinish(f, "old-answer")).latest_request_delivery).toBe(
+    "not_released",
+  );
+});
+it("preserves refusal and wrong-number closure after an unanswered question", async () => {
+  for (const text of [
+    "予約は承れません。それでは失礼します。",
+    "お電話番号が違います。",
+  ]) {
+    const f = await dialogueFixture();
+    await f.generate("request", "11月14日16時に変更できますか。");
+    await playedResponse(f, "request");
+    f.recipient(text);
+    expect((await modelFinish(f, "terminal")).ok).toBe(true);
+    expect(f.b.controller.pending.outcome).not.toBe("confirmed");
+  }
+});
+it("does not replace the latest request's playback evidence with a late older response", async () => {
+  const f = await dialogueFixture();
+  await f.b.onVoice({
+    type: "response.created",
+    response: { id: "old-draft" },
+  });
+  await f.b.onVoice({
+    type: "response.output_audio_transcript.delta",
+    response_id: "old-draft",
+    delta: "今日16時の予約ですか。",
+  });
+  await f.generate("current-request", "11月14日16時に変更をお願いします。");
+  await playedResponse(f, "current-request");
+  f.recipient("はい、11月14日16時に変更しました。");
+  const request = structuredClone(f.b.context.latest_task_request);
+  await f.b.onVoice({
+    type: "response.done",
+    response: { id: "old-draft", status: "completed" },
+  });
+  expect(f.b.context.latest_task_request).toEqual(request);
+  expect((await modelFinish(f, "current-answer")).ok).toBe(true);
+});
+it("keeps bounded server silence cleanup working after rejected model confirmation", async () => {
+  const f = await dialogueFixture();
+  f.recipient("歯科でございます。");
+  await f.generate("unanswered", "11月14日16時に変更できますか。");
+  await playedResponse(f, "unanswered");
+  expect((await modelFinish(f, "unanswered-finish")).ok).toBe(false);
+  f.advance(20000);
+  await f.b.checkDialogue();
+  expect(f.b.context.attention).toBeTruthy();
+  f.b.context.attention.completed = true;
+  f.b.silence.checkCompleted();
+  f.advance(15000);
+  await f.b.checkDialogue();
+  expect(f.b.controller.pending).toMatchObject({
+    outcome: "unable_to_proceed",
+    reason: "recipient_silence_timeout",
+  });
+  f.b.context.controlled_closing.completed = true;
+  f.b.controller.event({ type: "system_farewell_completed" });
+  f.advance(300);
+  await f.b.checkDialogue();
+  expect(f.network.filter((n: any) => n.url.endsWith("/hangup"))).toHaveLength(
+    1,
+  );
+  expect(f.b.context.close_outcome).toBe("unable_to_proceed");
 });
 it("uses actual STT interim replay evidence to release one queued DTMF while keeping model audio silent", async () => {
   const f = await dialogueFixture();

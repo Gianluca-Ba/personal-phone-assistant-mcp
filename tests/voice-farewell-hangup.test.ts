@@ -58,6 +58,16 @@ async function closing(outcome = "unable_to_proceed") {
   const f = await createOfflineVoiceFixture();
   fixtures.push(f);
   await f.recipient("もしもし。ご用件をお伺いします。");
+  if (outcome === "confirmed") {
+    f.advance(800);
+    await f.generate(
+      "settled-restock-question",
+      "次回の入荷予定は分かりますか。",
+    );
+    f.advance(250);
+    for (const name of [...f.b.marks.pending.keys()])
+      f.b.marks.acknowledge(name);
+  }
   await f.recipient("入荷予定は未定です。");
   await f.b.onVoice({
     type: "conversation.item.created",
