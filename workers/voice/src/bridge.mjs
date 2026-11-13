@@ -8,6 +8,11 @@ import {
   isAudibilityCheck,
 } from "./turns.mjs";
 import { composeOutboundTask, speechViolation } from "./spoken-policy.mjs";
+import {
+  appointmentMismatch,
+  playedAppointmentQuestion,
+  recipientAppointmentOffer,
+} from "./appointment-evidence.mjs";
 import { holdReturnText } from "../../../scripts/jp-recipient-evidence.mjs";
 import { SilenceWatchdog } from "./silence.mjs";
 import {
@@ -562,6 +567,8 @@ export class VoiceBridge {
               latest_request: this.context.latest_task_request ?? null,
               rejected_confirmation_count:
                 this.context.rejected_confirmation_count ?? 0,
+              appointment_offer: this.context.appointment_offer ?? null,
+              appointment_rejection: this.context.appointment_rejection ?? null,
               recipient_reception_proven: false,
             }),
             ...(this.context.initial_audio_delivery
@@ -1130,8 +1137,11 @@ export class VoiceBridge {
       reason: "RECIPIENT_CONFIRMATION_NOT_OBSERVED_AFTER_PLAYBACK",
       action_not_executed: true,
       latest_request_delivery: delivery,
+      ...(this.context.appointment_rejection
+        ? { appointment_rejection: this.context.appointment_rejection }
+        : {}),
       instruction:
-        "Silent transport feedback: the task is not confirmed. Generated assistant text is not evidence of played audio. No substantive recipient answer in a new turn after the latest request's playback was observed. Do not infer acceptance from silence, a greeting, an earlier answer, or an unplayed question. Listen; when the recipient is quiet, clarify or repeat one short authorized request if needed. Never read this feedback aloud. The server's bounded silence/hold cleanup remains active.",
+        "Silent transport feedback: the task is not confirmed. Generated assistant text is not evidence of played audio. No substantive recipient answer in a new turn after the latest request's playback was observed. Do not infer acceptance from silence, a greeting, an earlier answer, or an unplayed question. Listen; when the recipient is quiet, clarify or repeat one short authorized request if needed. If appointment_rejection includes an offered_slot, the mismatched request was not played; use only that exact offered month, day and time if authorized, or ask for clarification. Never read this feedback aloud. The server's bounded silence/hold cleanup remains active.",
     };
   }
   async playAttention() {
@@ -1313,7 +1323,7 @@ export class VoiceBridge {
     response.waitingForQuiet = false;
     response.chunks = [];
     if (
-      expectsRecipientAnswer(response.text) &&
+      (expectsRecipientAnswer(response.text) || response.appointmentBlocked) &&
       response.sequence >=
         (this.context.latest_task_request?.response_sequence ?? 0)
     )
@@ -1325,6 +1335,7 @@ export class VoiceBridge {
         playback_after_turn: null,
         recipient_answer_at: null,
         interrupted: false,
+        appointment_candidate: playedAppointmentQuestion(response.text),
       };
     if (id === this.controller.responseId) {
       this.controller.event({
@@ -1653,6 +1664,18 @@ export class VoiceBridge {
       this.silence.activity();
       this.context.recipient_heard = true;
       this.controller.event({ type: "recipient_answer" });
+      const appointmentQuestion = this.context.appointment_played_question;
+      const offered =
+        !this.controller.hold && !this.controller.holdExpired
+          ? recipientAppointmentOffer(
+              text,
+              appointmentQuestion &&
+                this.recipientTurnSequence > appointmentQuestion.after_turn
+                ? appointmentQuestion.slot
+                : null,
+            )
+          : null;
+      if (offered) this.context.appointment_offer = offered;
       const request = this.context.latest_task_request;
       if (
         request?.playback_completed_at &&
@@ -1813,6 +1836,13 @@ export class VoiceBridge {
         ) {
           request.playback_completed_at = this.now();
           request.playback_after_turn = this.recipientTurnSequence ?? 0;
+          this.context.appointment_played_question =
+            request.appointment_candidate
+              ? {
+                  slot: request.appointment_candidate,
+                  after_turn: request.playback_after_turn,
+                }
+              : null;
         }
         if (
           this.context.initial_audio_delivery &&
@@ -2177,6 +2207,18 @@ export class VoiceBridge {
               : speechViolation(response.text, { final: true })
             : null;
         if (violation) await this.rejectSpokenResponse(id, violation);
+        const appointmentBlock =
+          !response.suppressed && response.bytes
+            ? appointmentMismatch(response.text, this.context.appointment_offer)
+            : null;
+        if (appointmentBlock) {
+          response.appointmentBlocked = true;
+          this.context.appointment_rejection = appointmentBlock;
+          await this.rejectSpokenResponse(id, appointmentBlock.reason);
+          // The provider accepts only user messages here. Keep transport
+          // feedback in the supported tool-result channel, never fake a
+          // recipient turn or send an unsupported system message.
+        }
         if (!response.suppressed && response.chunks.length) {
           response.validated = true;
           // The transcript is final and immutable. Wait briefly for real quiet;

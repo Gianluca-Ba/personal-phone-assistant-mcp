@@ -9,6 +9,13 @@ const { decodeMuLaw, MuLawEncoder } = await import(
 const { VoiceBridge } = await import(
   new URL("../workers/voice/src/bridge.mjs", import.meta.url).href
 );
+const {
+  appointmentMismatch,
+  playedAppointmentQuestion,
+  recipientAppointmentOffer,
+} = await import(
+  new URL("../workers/voice/src/appointment-evidence.mjs", import.meta.url).href
+);
 const { default: worker } = await import(
   new URL("../workers/voice/src/index.mjs", import.meta.url).href
 );
@@ -1995,6 +2002,176 @@ it("keeps bounded server silence cleanup working after rejected model confirmati
     1,
   );
   expect(f.b.context.close_outcome).toBe("unable_to_proceed");
+});
+it("keeps an offered appointment time attached to the played date and blocks a different change before any audio leaves", async () => {
+  const f = await dialogueFixture();
+  await f.generate(
+    "date-question",
+    "11月14日土曜日の同じ16時に空きはありますか。",
+  );
+  await playedResponse(f, "date-question");
+  f.recipient("16時でしたら空いております。");
+  expect(f.b.context.appointment_offer).toEqual({
+    month: 11,
+    day: 14,
+    hour: 16,
+    minute: 0,
+  });
+  const before = f.media.frames.filter((m: any) => m.event === "media").length;
+  await f.generate(
+    "wrong-date",
+    "11月15日16時に予約を変更していただけますか。",
+  );
+  expect(f.b.responses.get("wrong-date").rendered).toBe(0);
+  expect(f.b.responses.get("wrong-date").blockReason).toBe(
+    "APPOINTMENT_OFFER_MISMATCH",
+  );
+  expect(f.media.frames.filter((m: any) => m.event === "media")).toHaveLength(
+    before,
+  );
+  expect(f.b.voice.frames.some((m: any) => m.item?.role === "system")).toBe(
+    false,
+  );
+  const feedback = f.b.unansweredConfirmation();
+  expect(feedback.appointment_rejection.reason).toBe(
+    "APPOINTMENT_OFFER_MISMATCH",
+  );
+  expect(feedback.appointment_rejection.offered_slot.day).toBe(14);
+  await f.generate("wrong-date-please", "それでは11月15日16時でお願いします。");
+  expect(f.b.responses.get("wrong-date-please").rendered).toBe(0);
+  expect(f.b.context.latest_task_request.released_at).toBeNull();
+  const rejectedFinish = await modelFinish(f, "wrong-date-cannot-finish");
+  expect(rejectedFinish.ok).toBe(false);
+  expect(rejectedFinish.appointment_rejection.offered_slot.day).toBe(14);
+  await f.generate("correct-date", "11月14日16時への予約変更をお願いします。");
+  expect(f.b.responses.get("correct-date").rendered).toBeGreaterThan(0);
+  expect(f.b.context.output_audit.recipient_reception_proven).toBe(false);
+});
+it("does not inherit an offer's date from a generated question that never played", async () => {
+  const f = await dialogueFixture();
+  f.b.activity.active = true;
+  await f.generate("unplayed-date", "11月14日16時に空きはありますか。");
+  f.advance(2100);
+  f.b.flushBufferedResponses();
+  f.b.activity.active = false;
+  f.recipient("16時でしたら空いております。");
+  expect(f.b.context.appointment_offer).toBeUndefined();
+  expect(f.b.context.appointment_played_question).toBeUndefined();
+});
+it("ignores an unplayed date when an older played date is the actual recipient context", async () => {
+  const f = await dialogueFixture();
+  await f.generate("heard-date", "12月20日16時に空きはありますか。");
+  await playedResponse(f, "heard-date");
+  f.b.activity.active = true;
+  await f.generate("unheard-date", "12月21日16時に空きはありますか。");
+  f.advance(2100);
+  f.b.flushBufferedResponses();
+  f.b.activity.active = false;
+  f.recipient("16時でしたら空いております。");
+  expect(f.b.context.appointment_offer).toEqual({
+    month: 12,
+    day: 20,
+    hour: 16,
+    minute: 0,
+  });
+  await f.generate(
+    "wrong-inferred-date",
+    "12月21日16時への予約変更をお願いします。",
+  );
+  expect(f.b.responses.get("wrong-inferred-date").rendered).toBe(0);
+});
+it("accepts a fully stated new recipient offer and allows asking availability of another date", async () => {
+  const f = await dialogueFixture();
+  await f.generate("initial-date", "11月14日16時に空きはありますか。");
+  await playedResponse(f, "initial-date");
+  f.recipient("11月15日9時30分でしたら空いております。");
+  expect(f.b.context.appointment_offer).toEqual({
+    month: 11,
+    day: 15,
+    hour: 9,
+    minute: 30,
+  });
+  await f.generate("check-another-date", "11月16日16時に空きはありますか。");
+  expect(f.b.responses.get("check-another-date").rendered).toBeGreaterThan(0);
+  await playedResponse(f, "check-another-date");
+  f.recipient("11月15日9時30分でしたら空いております。");
+  await f.generate(
+    "accept-explicit-offer",
+    "11月15日9時30分に予約を変更していただけますか。",
+  );
+  expect(f.b.responses.get("accept-explicit-offer").rendered).toBeGreaterThan(
+    0,
+  );
+});
+it("requires playback before inheriting an omitted offer date and does not convert an echo or question into an offer", async () => {
+  const f = await dialogueFixture();
+  await f.generate("pending-playback", "11月14日16時に空きはありますか。");
+  f.recipient("16時でしたら空いております。");
+  expect(f.b.context.appointment_offer).toBeUndefined();
+  await playedResponse(f, "pending-playback");
+  f.recipient("十六時ですね。");
+  f.recipient("今日この16時が難しいですかね、いらっしゃるのが。");
+  expect(f.b.context.appointment_offer).toBeUndefined();
+});
+it("parses explicit Japanese slots conservatively without mistaking the old appointment for the new target", () => {
+  const offered = { month: 11, day: 14, hour: 16, minute: 0 };
+  expect(
+    recipientAppointmentOffer("十一月十四日午後四時でしたら空いております。"),
+  ).toEqual(offered);
+  expect(
+    playedAppointmentQuestion("１１月１４日１６時に空きはありますか。"),
+  ).toEqual(offered);
+  expect(recipientAppointmentOffer("16時ですね。", offered)).toBeNull();
+  expect(
+    recipientAppointmentOffer("16時は空いていません。", offered),
+  ).toBeNull();
+  expect(
+    recipientAppointmentOffer("16時は空いていますか。", offered),
+  ).toBeNull();
+  expect(
+    appointmentMismatch(
+      "11月14日土曜日16時に、現在の11月13日16時の予約を変更してもよろしいでしょうか。",
+      offered,
+    ),
+  ).toBeNull();
+  expect(
+    appointmentMismatch(
+      "現在の11月13日16時の予約を、11月14日16時に変更していただけますか。",
+      offered,
+    ),
+  ).toBeNull();
+  expect(
+    appointmentMismatch(
+      "11月14日16時半に予約を変更していただけますか。",
+      offered,
+    )?.reason,
+  ).toBe("APPOINTMENT_OFFER_MISMATCH");
+  expect(
+    appointmentMismatch("その16時に予約を変更していただけますか。", offered)
+      ?.reason,
+  ).toBe("APPOINTMENT_OFFER_MISMATCH");
+  expect(
+    appointmentMismatch(
+      "11月14日16時または11月15日16時に変更をお願いします。",
+      offered,
+    )?.reason,
+  ).toBe("APPOINTMENT_OFFER_MISMATCH");
+  expect(
+    appointmentMismatch("11月15日16時に空きはありますか。", offered),
+  ).toBeNull();
+  expect(
+    appointmentMismatch(
+      "空いている11月15日16時に予約を変更してください。",
+      offered,
+    )?.reason,
+  ).toBe("APPOINTMENT_OFFER_MISMATCH");
+  expect(
+    appointmentMismatch("それでは11月15日16時でお願いします。", offered)
+      ?.reason,
+  ).toBe("APPOINTMENT_OFFER_MISMATCH");
+  expect(
+    appointmentMismatch("iPhoneは予約なしで購入できますか。", offered),
+  ).toBeNull();
 });
 it("uses actual STT interim replay evidence to release one queued DTMF while keeping model audio silent", async () => {
   const f = await dialogueFixture();

@@ -55,7 +55,7 @@ stored under the ignored `.wrangler/dentist-2026-11-13/` directory.
 
 ## Validation
 
-- Final unit suite: 447 tests across 25 files passed, including unanswered
+- Final unit suite: 454 tests across 25 files passed, including unanswered
   imperatives, all model closure outcomes, stale response ordering, interrupted
   playback, recipient clarification questions, and bounded unresolved cleanup.
 - Type checking and all worker dry builds passed; the final voice build uses a
@@ -66,3 +66,27 @@ stored under the ignored `.wrangler/dentist-2026-11-13/` directory.
   a greeting. Their outcome remains independently unverified.
 - A cold full-suite run hit the known SDK import timeout and downstream shared
   counter failure. The final warm suite passed without changes to those tests.
+
+## Offered appointment date
+
+A serialized real-AI simulation exposed a separate date slip: after availability
+for 14 November at 16:00, the model requested 15 November at 16:00. A release
+guard now records explicit Japanese calendar/time tuples from recipient offers.
+An omitted date may inherit only from a question with completed carrier playback,
+never from generated or discarded speech. A conflicting replacement request is
+blocked before audio is released; it also invalidates successful closure until
+another request is played and answered. Availability questions remain possible.
+
+A protocol probe found that Telnyx rejects `conversation.item.create` with
+`role: system`. That unsupported event was removed before release. Recovery
+feedback stays in the existing supported function-result channel, with no fake
+recipient messages. The date guard does not itself expand authorization, prove
+acceptance, or resolve every ambiguous Japanese date expression.
+
+The final serialized real-AI simulation passed: a time-only echo, the recipient's
+question about attending today, and an 11-second unanswered interval did not
+cause premature closure. The replacement request used 14 November at 16:00;
+only an explicit synthetic acceptance was followed by one simulated hangup.
+All phone actions and metadata writes were intercepted; zero real calls and
+zero recording uploads occurred during validation. This is not a completed
+appointment change or proof of performance on the recipient's phone line.

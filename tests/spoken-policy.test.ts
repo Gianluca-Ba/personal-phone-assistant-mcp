@@ -176,6 +176,7 @@ it("allows short identification, date clarification and exact replacement questi
     "16時は何月何日のことでしょうか。",
     "今の16時は、変更前の予約時刻のことでしょうか。",
     "11月13日16時の予約を、11月14日9時半に変更していただけますか。",
+    "現在の予約を11月14日16時に変更していただけますか。",
     "11月14日9時半への変更は確定しましたか。",
     "元の予約はそのままで、候補の日時を教えていただけますか。",
   ])
@@ -188,6 +189,22 @@ it("allows short identification, date clarification and exact replacement questi
   ).toBe("multiple_questions");
 });
 
+it("keeps an offered replacement attached to its played date instead of promoting the next preference", () => {
+  const task = "Prefer November 14, then November 15, at any available time.";
+  const policy = composeOutboundTask(task, { systemInitialAck: true });
+  expect(policy).toContain(JSON.stringify({ authorized_task: task }));
+  expect(policy).toContain("availability question actually played");
+  expect(policy).toContain(
+    "Do not advance to the next preferred date while a compatible slot has been offered",
+  );
+  expect(policy).toContain(
+    "Never silently change the calendar date to fit a weekday label",
+  );
+  expect(policy).toContain(
+    "correct the next short question to that exact offered month, day and time",
+  );
+});
+
 it("keeps closure-rejection diagnostics out of speech without rejecting a recipient-facing clarification", () => {
   for (const text of [
     "AWAITING_RECIPIENT_ANSWER",
@@ -196,6 +213,9 @@ it("keeps closure-rejection diagnostics out of speech without rejecting a recipi
     "ありがとうございます。HOLD_OR_QUESTION_PENDINGです。",
     "RECIPIENT_CONFIRMATION_NOT_OBSERVED_AFTER_PLAYBACK",
     "latest_request_deliveryはnot_releasedです。",
+    "APPOINTMENT_OFFER_MISMATCH",
+    "ＡＰＰＯＩＮＴＭＥＮＴ＿ＯＦＦＥＲ＿ＭＩＳＭＡＴＣＨ",
+    "offered_slotを確認しています。",
   ])
     expect(speechViolation(text), text).toBe("internal_report");
   expect(speechViolation("変更後の日時を確認していただけますか。")).toBeNull();
