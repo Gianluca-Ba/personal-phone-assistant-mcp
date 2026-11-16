@@ -730,6 +730,8 @@ export class VoiceBridge {
   }
   async playControlledFarewell(outcome, op) {
     if (this.initialAckPending()) await this.cancelInitialAck();
+    if (this.taskSpeechPending()) await this.cancelTaskSpeech();
+    if (this.context.task_speech?.stop_unconfirmed) return;
     // The model never supplies the farewell audio in the controlled route.
     this.suppressCurrentResponse("controlled_farewell");
     const generation = (this.context.farewell_generation ?? 0) + 1;
@@ -790,7 +792,13 @@ export class VoiceBridge {
           this.background(this.fail("farewell_playback_unconfirmed"));
       }, 20000);
   }
-  systemVoiceAction(action, body, operation, permitted = () => !this.ended) {
+  systemVoiceAction(
+    action,
+    body,
+    operation,
+    permitted = () => !this.ended,
+    dispatchGuard = () => true,
+  ) {
     // Serialize fixed speech and stop commands so a late stop for an old
     // farewell cannot overtake a newly requested farewell/check.
     this.systemActionsPending = (this.systemActionsPending ?? 0) + 1;
@@ -798,7 +806,7 @@ export class VoiceBridge {
       .catch(() => {})
       .then(() =>
         permitted()
-          ? this.voiceAPI(action, body, operation)
+          ? this.voiceAPI(action, body, operation, dispatchGuard)
           : { ok: true, skipped: true },
       )
       .finally(() => {
@@ -878,7 +886,7 @@ export class VoiceBridge {
     }, 5000);
   }
   speakingOutput() {
-    if (this.initialAckPending()) return true;
+    if (this.initialAckPending() || this.taskSpeechPending()) return true;
     if (
       this.context.controlled_closing &&
       !this.context.controlled_closing.cancelled
@@ -952,6 +960,12 @@ export class VoiceBridge {
   deferInitialAudibilityCheck(text) {
     if (!isAudibilityCheck(text)) return false;
     if (
+      this.taskSpeechPending() &&
+      this.now() - this.context.task_speech.requested_at < 10000 &&
+      !this.modelMustRemainSilent({ allowTaskSpeech: true })
+    )
+      return true;
+    if (
       this.context.initial_audio_delivery &&
       this.context.initial_audio_delivery.id === this.controller?.responseId
     )
@@ -977,6 +991,7 @@ export class VoiceBridge {
     if (request?.released_at && !request.playback_completed_at)
       request.interrupted = true;
     if (this.initialAckPending()) this.background(this.cancelInitialAck());
+    if (this.taskSpeechPending()) this.background(this.cancelTaskSpeech());
     const previous = this.responses.get(this.controller.responseId);
     if (
       this.context.initial_audio_delivery &&
@@ -1042,10 +1057,12 @@ export class VoiceBridge {
         s.raw_five_finals++;
     }
   }
-  modelMustRemainSilent() {
+  modelMustRemainSilent({ allowTaskSpeech = false } = {}) {
     return !!(
+      (!allowTaskSpeech && this.taskSpeechPending()) ||
       (this.context.dialogue_gate_required === true &&
         !this.context.dialogue_candidate_observed) ||
+      this.context.task_speech?.stop_unconfirmed ||
       this.controller?.hold ||
       this.context.ivr_progress?.state === "awaiting_transition" ||
       this.routingWait() ||
@@ -1207,6 +1224,105 @@ export class VoiceBridge {
     const ack = this.context?.initial_ack;
     return !!(ack && !ack.completed_at && !ack.cancelled);
   }
+  taskSpeechPending() {
+    const speech = this.context?.task_speech;
+    return !!(speech && !speech.completed_at && !speech.cancelled);
+  }
+  async cancelTaskSpeech() {
+    if (!this.taskSpeechPending()) return;
+    const speech = this.context.task_speech;
+    speech.cancelled = true;
+    // Keep every speaker muted until the carrier has confirmed the stop.
+    speech.stop_unconfirmed = true;
+    const request = this.context.latest_task_request;
+    if (request?.response_digest === speech.response_digest)
+      request.interrupted = true;
+    const result = await this.systemVoiceAction(
+      "playback_stop",
+      { stop: "all" },
+      "cancel-task-speech:" + speech.response_digest,
+    );
+    speech.stop_unconfirmed = !result.ok;
+    await this.persist();
+  }
+  canRecoverTaskSpeech(text) {
+    const question = text.trim();
+    return (
+      this.env.EXTERNAL_STT === "true" &&
+      !!this.context.answered_at &&
+      !!this.context.call_id &&
+      !!this.streamId &&
+      !!this.context.dialogue_candidate_observed &&
+      (this.context.task_speech_attempts ?? 0) < 2 &&
+      question.length <= 72 &&
+      /[\p{Script=Han}\p{Script=Hiragana}]/u.test(question) &&
+      /^[^。.!！?？\n<>]+(?:でしょうか|ですか|ますか)[。?？]?$/.test(
+        question,
+      ) &&
+      !isAudibilityCheck(question)
+    );
+  }
+  async playRecoveredTaskSpeech(id, text) {
+    const request = this.context.latest_task_request;
+    const digest = sha256(String(id)).slice(0, 16);
+    if (
+      request?.response_digest !== digest ||
+      this.taskSpeechPending() ||
+      !this.canRecoverTaskSpeech(text)
+    )
+      return;
+    const speech = {
+      state: Buffer.from(
+        JSON.stringify({
+          request_id: this.context.request_id,
+          nonce: this.context.nonce,
+          phase: "task_speech",
+          token: uuid(),
+        }),
+      ).toString("base64"),
+      response_digest: digest,
+      requested_at: this.now(),
+      completed_at: null,
+      cancelled: false,
+    };
+    this.context.task_speech = speech;
+    this.context.task_speech_attempts =
+      (this.context.task_speech_attempts ?? 0) + 1;
+    await this.persist();
+    const permitted = () =>
+      !this.ended &&
+      !this.failing &&
+      !speech.cancelled &&
+      !this.controller.closing &&
+      !this.controller.closed &&
+      this.controller.responseId === id &&
+      this.context.latest_task_request === request &&
+      !this.modelMustRemainSilent({ allowTaskSpeech: true }) &&
+      !this.turnOpen &&
+      !this.controller.speaking &&
+      !this.activity?.active &&
+      !this.marks.pending.size &&
+      this.controller.playback.remaining(this.now()) <= 0 &&
+      this.now() >= this.controller.acousticGuardUntil;
+    const result = await this.systemVoiceAction(
+      "speak",
+      {
+        payload: text,
+        payload_type: "text",
+        voice: "female",
+        language: "ja-JP",
+        client_state: speech.state,
+      },
+      "task-speech:" + digest,
+      permitted,
+      permitted,
+    );
+    if (result.skipped || result.reason === "DISPATCH_DEFERRED")
+      speech.cancelled = true;
+    else if (!result.ok && this.taskSpeechPending())
+      await this.cancelTaskSpeech();
+    await this.persist();
+  }
   async cancelInitialAck() {
     const ack = this.context.initial_ack;
     if (!this.initialAckPending()) return;
@@ -1323,6 +1439,7 @@ export class VoiceBridge {
     response.waitingForQuiet = false;
     response.chunks = [];
     if (
+      !this.taskSpeechPending() &&
       (expectsRecipientAnswer(response.text) || response.appointmentBlocked) &&
       response.sequence >=
         (this.context.latest_task_request?.response_sequence ?? 0)
@@ -1419,9 +1536,19 @@ export class VoiceBridge {
         !this.systemActionsPending &&
         !this.initialAckPending() &&
         !this.activity?.active &&
-        !this.controller.speaking
-      )
-        this.completeBufferedResponse(id, response, true);
+        !this.controller.speaking &&
+        (!response.recoverSpeech ||
+          (!this.turnOpen &&
+            !this.marks.pending.size &&
+            this.controller.playback.remaining(this.now()) <= 0 &&
+            this.now() >= this.controller.acousticGuardUntil))
+      ) {
+        this.completeBufferedResponse(id, response, !response.recoverSpeech);
+        if (response.recoverSpeech)
+          this.background(
+            this.playRecoveredTaskSpeech(id, response.text.trim()),
+          );
+      }
     }
   }
   async checkDialogue() {
@@ -1454,6 +1581,12 @@ export class VoiceBridge {
         });
       }
       await this.playInitialAck();
+      if (
+        this.taskSpeechPending() &&
+        (this.modelMustRemainSilent({ allowTaskSpeech: true }) ||
+          this.now() - this.context.task_speech.requested_at >= 15000)
+      )
+        await this.cancelTaskSpeech();
       if (this.initialAckPending() && this.modelMustRemainSilent())
         await this.cancelInitialAck();
       if (
@@ -2116,7 +2249,17 @@ export class VoiceBridge {
       if (this.modelMustRemainSilent()) response.suppressed = true;
       if (response.suppressed) return;
       if (response.bytes > this.outputRate * 2 * this.speechLimit()) {
-        await this.rejectSpokenResponse(id, "utterance_length_limit");
+        // Keep no overlong audio. Give a bounded, complete transcript a
+        // chance to recover through a separate synthesized playback.
+        response.chunks = [];
+        response.blockReason = "utterance_length_limit";
+        response.overlongAudio = true;
+        if (
+          this.env.EXTERNAL_STT !== "true" ||
+          response.bytes > this.outputRate * 2 * 20 ||
+          (this.context.task_speech_attempts ?? 0) >= 2
+        )
+          await this.rejectSpokenResponse(id, "utterance_length_limit");
         return;
       }
       // Audio and transcript deltas have no trusted word-level alignment.
@@ -2141,6 +2284,12 @@ export class VoiceBridge {
           await this.rejectSpokenResponse(id, "transcript_length_limit");
         else response.text += delta;
       }
+    } else if (
+      ["response.output_audio.done", "response.audio.done"].includes(frame.type)
+    ) {
+      const response = this.responses.get(id);
+      if (response && !response.completed && !response.finalized)
+        response.audioCompleted = true;
     } else if (frame.type === "response.done") {
       const response = this.responses.get(id);
       if (!response || response.completed || response.finalized) return;
@@ -2219,7 +2368,17 @@ export class VoiceBridge {
           // feedback in the supported tool-result channel, never fake a
           // recipient turn or send an unsupported system message.
         }
-        if (!response.suppressed && response.chunks.length) {
+        if (response.overlongAudio && !response.suppressed) {
+          response.recoverSpeech =
+            (!!transcript || response.audioCompleted) &&
+            this.canRecoverTaskSpeech(response.text);
+          if (!response.recoverSpeech)
+            await this.rejectSpokenResponse(id, "utterance_length_limit");
+        }
+        if (
+          !response.suppressed &&
+          (response.chunks.length || response.recoverSpeech)
+        ) {
           response.validated = true;
           // The transcript is final and immutable. Wait briefly for real quiet;
           // a raw acoustic tail must not permanently discard a safe first reply.
@@ -2244,7 +2403,9 @@ export class VoiceBridge {
         ["confirmed", "refused", "wrong_number", "unable_to_proceed"].includes(
           args?.outcome,
         ) &&
-        (args.outcome === "confirmed" || this.context.latest_task_request) &&
+        (args.outcome === "confirmed" ||
+          this.context.latest_task_request ||
+          this.responses.get(this.controller.responseId)?.recoverSpeech) &&
         !this.controller.recipientTerminal &&
         !this.controller.holdExpired &&
         !this.context.latest_task_request?.recipient_answer_at
@@ -2498,6 +2659,35 @@ export class VoiceBridge {
       // Remote hangup also publishes the latest audit. Status delivery above
       // remains successful if this optional metadata service is unavailable.
       await this.bindConversation(true).catch(() => {});
+    } else if (
+      event.event_type === "call.speak.ended" &&
+      this.taskSpeechPending() &&
+      this.context.task_speech.state === payload.client_state &&
+      payload.status === "completed"
+    ) {
+      const speech = this.context.task_speech;
+      speech.completed_at = this.now();
+      const request = this.context.latest_task_request;
+      if (
+        request?.response_digest === speech.response_digest &&
+        !request.interrupted
+      ) {
+        request.released_at = speech.requested_at;
+        request.playback_completed_at = speech.completed_at;
+        request.playback_after_turn = this.recipientTurnSequence ?? 0;
+        this.context.appointment_played_question = request.appointment_candidate
+          ? {
+              slot: request.appointment_candidate,
+              after_turn: request.playback_after_turn,
+            }
+          : null;
+        this.context.output_audit.completed_task_speech =
+          (this.context.output_audit.completed_task_speech ?? 0) + 1;
+        if (this.controller) this.controller.assistantQuestionPending = true;
+        this.spokenBlocks = 0;
+        this.silence.activity();
+      }
+      await this.persist();
     } else if (
       event.event_type === "call.speak.ended" &&
       this.context.initial_ack?.state === payload.client_state &&

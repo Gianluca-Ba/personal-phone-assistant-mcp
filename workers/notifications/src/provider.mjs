@@ -108,21 +108,25 @@ export async function fetchVoiceEvidence(env, row, fetcher = fetch) {
       typeof m.voice_output_audit === "string"
         ? JSON.parse(m.voice_output_audit)
         : m.voice_output_audit;
+    const completedTaskSpeech =
+      audit?.completed_task_speech === undefined
+        ? 0
+        : audit.completed_task_speech;
     if (
       !audit ||
       !Number.isSafeInteger(audit.released_pcm_bytes) ||
       audit.released_pcm_bytes < 0 ||
       !Number.isSafeInteger(audit.released_responses) ||
       audit.released_responses < 0 ||
-      (audit.released_pcm_bytes === 0) !== (audit.released_responses === 0)
+      (audit.released_pcm_bytes === 0) !== (audit.released_responses === 0) ||
+      !Number.isSafeInteger(completedTaskSpeech) ||
+      completedTaskSpeech < 0
     )
       return unknown;
-    return {
-      state:
-        audit.released_pcm_bytes === 0
-          ? "no_model_audio"
-          : "model_audio_released",
-    };
+    if (audit.released_pcm_bytes > 0) return { state: "model_audio_released" };
+    if (completedTaskSpeech > 0)
+      return { state: "carrier_task_speech_completed" };
+    return { state: "no_model_audio" };
   } catch {
     // Missing telemetry is uncertainty, never proof of transmission or silence.
     return unknown;

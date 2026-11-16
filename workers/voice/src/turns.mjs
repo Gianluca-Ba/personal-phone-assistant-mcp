@@ -222,25 +222,37 @@ export function isAudibilityCheck(text) {
     .split(/[。.!！?？\n]/)
     .map((s) => s.replace(/[、,\s]/g, ""))
     .filter(Boolean);
-  const first = parts.shift() ?? "";
-  const check =
-    /^(?:もしもし){1,2}$/.test(first) ||
+  const check = (part) =>
+    /^(?:もしもし){1,2}$/.test(part) ||
     /^(?:Apple|アップル)(?:Store|ストア)?(?:川崎|カワサキ|kawasaki|銀座|ギンザ|ginza|渋谷|シブヤ|shibuya|丸の内|マルノウチ|marunouchi|表参道|オモテサンドウ|omotesando)(?:店)?(?:店舗案内|電話案内)?(?:です|でございます)$/i.test(
-      first,
+      part,
     ) ||
     /^(?:お?客様)?(?:こちらの)?(?:お声|音声|声)(?:は|が)?(?:届いて|聞こえて)(?:おります|います|いらっしゃいます)(?:でしょう)?か(?:ね)?$/.test(
-      first,
+      part,
     ) ||
-    /^(?:こちらの)?(?:声|音声|お声)?(?:は|が)?聞こえますか$/.test(first);
-  return (
-    check &&
-    parts.every(
-      (s) =>
-        s.length <= 45 &&
-        /(?:につながっております|店舗案内です)$/.test(s) &&
-        !/予約|在庫|支払|承認|購入|変更|やめ|待|停止|質問|番号|暗証|送金/.test(
-          s,
-        ),
-    )
-  );
+    /^(?:お?客様)?(?:こちらの)?(?:声|音声|お声)?(?:は|が)?聞こえます(?:でしょう)?か$/.test(
+      part,
+    ) ||
+    /^お?客様これ届いておりますか$/.test(part) ||
+    /^(?:恐れ入ります(?:ただ)?)?(?:ただいま|今)?こちらに(?:お声|音声|声)(?:が|は)?届いて(?:おり|い)ません(?:ですが|が)?(?:お?客様(?:聞こえますでしょうか|ましたでしょうか)?)?$/.test(
+      part,
+    );
+  // A connection notice can precede the question in the same STT turn. It
+  // is not enough on its own to treat that turn as an audibility check.
+  const connectionNotice =
+    /^(?:お?電話(?:は|が)?つながって(?:おります|います)|お?客様)$/;
+  const index = parts.findIndex((part) => !connectionNotice.test(part));
+  if (index < 0 || !check(parts[index])) return false;
+  return parts
+    .slice(index + 1)
+    .every(
+      (part) =>
+        check(part) ||
+        connectionNotice.test(part) ||
+        (part.length <= 45 &&
+          /(?:につながっております|店舗案内です)$/.test(part) &&
+          !/予約|在庫|支払|承認|購入|変更|やめ|待|停止|質問|番号|暗証|送金|違い|別の/.test(
+            part,
+          )),
+    );
 }

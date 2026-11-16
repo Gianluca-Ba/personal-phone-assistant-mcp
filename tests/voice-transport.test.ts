@@ -895,10 +895,11 @@ it("lets a current IVR sentence finish before the no-transition close, without w
   expect(f.network.filter((n) => n.url.endsWith("/speak"))).toHaveLength(1);
 });
 
-async function dialogueFixture() {
+async function dialogueFixture(instructions?: string) {
   const f = fixture();
   f.env.EXTERNAL_STT = "true";
   f.env.CONTROLLED_FAREWELL = "true";
+  if (instructions) f.row.instructions = instructions;
   await f.register();
   const media = new Socket();
   await f.b.attachMedia(media);
@@ -1603,6 +1604,217 @@ it("rejects untranscribed audio and caps audio duration and unfinished generatio
   expect(f.b.responses.get("stalled").blockReason).toBe("generation_timeout");
   expect(f.media.frames.some((m: any) => m.event === "media")).toBe(false);
 });
+
+const otaChairQuestion =
+  "ガスシリンダー付きの椅子の脚だけでも、粗大ごみで出せますか。";
+const otaOversizedPcmBytes = 645120;
+async function otaDialogueFixture() {
+  const f = await dialogueFixture(
+    "ガスシリンダー付きのLiberNovoの椅子の脚部のみを粗大ごみとして出せるか、費用はいくらかを聞いてください。予約や支払いはしないでください。",
+  );
+  f.b.outputRate = 24000;
+  f.b.context.answered_at = new Date(f.advance(0)).toISOString();
+  recognitionTurn(
+    f,
+    "ご家庭から出る粗大ごみの収集の申し込みでよろしいですか？",
+    1,
+  );
+  f.advance(1000);
+  return f;
+}
+
+async function startOversizedReply(
+  f: Awaited<ReturnType<typeof otaDialogueFixture>>,
+  id: string,
+) {
+  await f.b.onVoice({ type: "response.created", response: { id } });
+  await f.b.onVoice({
+    type: "response.output_audio.delta",
+    response_id: id,
+    delta: Buffer.alloc(otaOversizedPcmBytes).toString("base64"),
+  });
+}
+
+async function finishOversizedReply(
+  f: Awaited<ReturnType<typeof otaDialogueFixture>>,
+  id: string,
+  text = otaChairQuestion,
+  { status = "completed", shape = "final" } = {},
+) {
+  if (text)
+    await f.b.onVoice({
+      type: "response.output_audio_transcript.delta",
+      response_id: id,
+      delta: text,
+    });
+  if (shape === "audio-done")
+    await f.b.onVoice({ type: "response.output_audio.done", response_id: id });
+  await f.b.onVoice({
+    type: "response.done",
+    response: {
+      id,
+      status,
+      output:
+        shape === "final"
+          ? [{ content: [{ type: "audio", transcript: text }] }]
+          : [],
+    },
+  });
+  f.advance(1000);
+  await f.b.checkDialogue();
+}
+
+it.each(["final", "audio-done"])(
+  "recovers the Ōta enquiry with %s without replaying PCM or treating an audibility check as an answer",
+  async (shape) => {
+    const f = await otaDialogueFixture();
+    const id = "oversized-chair-question";
+    await startOversizedReply(f, id);
+    expect(f.network.some((n: any) => n.url.endsWith("/speak"))).toBe(false);
+    recognitionTurn(f, "お電話つながっております。お声届いておりますか?", 3);
+    f.advance(700);
+    await finishOversizedReply(f, id, otaChairQuestion, { shape });
+    await f.b.systemActions;
+    const recovered = f.network.filter(
+      (n: any) =>
+        n.url.endsWith("/speak") && n.body.payload === otaChairQuestion,
+    );
+    expect(recovered).toHaveLength(1);
+    expect(f.media.frames.some((m: any) => m.event === "media")).toBe(false);
+    expect(f.b.context.latest_task_request?.playback_completed_at).toBeFalsy();
+    const state = recovered[0].body.client_state;
+    const decoded = JSON.parse(Buffer.from(state, "base64").toString());
+    expect(decoded.phase).toBe("task_speech");
+    await ackCompletion(
+      f,
+      Buffer.from(
+        JSON.stringify({ ...decoded, token: crypto.randomUUID() }),
+      ).toString("base64"),
+    );
+    expect(f.b.context.latest_task_request?.playback_completed_at).toBeFalsy();
+    await expect(
+      ackCompletion(f, state, "completed", "foreign-call"),
+    ).rejects.toThrow("Call identity conflict");
+    expect(f.b.context.latest_task_request?.playback_completed_at).toBeFalsy();
+    await ackCompletion(f, state);
+    expect(f.b.context.latest_task_request?.playback_completed_at).toBeTruthy();
+    recognitionTurn(f, "聞こえますでしょうか?", 7);
+    expect(f.b.context.latest_task_request?.recipient_answer_at).toBeFalsy();
+    recognitionTurn(f, "はい、そのまま粗大ごみに出せます。", 8);
+    expect(f.b.context.latest_task_request?.recipient_answer_at).toBeTruthy();
+    f.advance(1000);
+    await f.b.checkDialogue();
+    expect(
+      f.network.filter(
+        (n: any) =>
+          n.url.endsWith("/speak") && n.body.payload === otaChairQuestion,
+      ),
+    ).toHaveLength(1);
+  },
+);
+
+it.each([
+  { label: "a missing transcript", text: "", turn: null },
+  {
+    label: "only transcript deltas",
+    text: otaChairQuestion,
+    turn: null,
+    noFinal: true,
+  },
+  {
+    label: "an unfinished question",
+    text: "ガスシリンダー付きの椅子の脚だけ",
+    turn: null,
+  },
+  {
+    label: "private output",
+    text: "Call Summary: unable_to_proceed。" + otaChairQuestion,
+    turn: null,
+  },
+  {
+    label: "multiple sentences",
+    text: "お問い合わせです。" + otaChairQuestion,
+    turn: null,
+  },
+  {
+    label: "a cancelled response",
+    text: otaChairQuestion,
+    turn: null,
+    status: "cancelled",
+  },
+  {
+    label: "an explicit hold",
+    text: otaChairQuestion,
+    turn: "確認しますので、少々お待ちください。",
+  },
+  {
+    label: "a changed recipient question",
+    text: otaChairQuestion,
+    turn: "いいえ、何をお出しになりますか？",
+  },
+])(
+  "does not recover oversized audio for $label",
+  async ({ text, turn, status, noFinal }) => {
+    const f = await otaDialogueFixture();
+    const id = "recoverable-looking-chair-question";
+    await startOversizedReply(f, id);
+    if (turn) recognitionTurn(f, turn, 3);
+    await finishOversizedReply(f, id, text, {
+      status,
+      shape: noFinal ? "delta" : "final",
+    });
+    await f.b.systemActions;
+    expect(f.network.some((n: any) => n.url.endsWith("/speak"))).toBe(false);
+    expect(f.media.frames.some((m: any) => m.event === "media")).toBe(false);
+    expect(f.b.context.latest_task_request?.playback_completed_at).toBeFalsy();
+  },
+);
+
+it("cancels dispatched recovered speech for a real hold, and ignores its late completion", async () => {
+  const f = await otaDialogueFixture();
+  const id = "recovered-then-held";
+  await startOversizedReply(f, id);
+  await finishOversizedReply(f, id);
+  await f.b.systemActions;
+  const [speak] = f.network.filter((n: any) => n.url.endsWith("/speak"));
+  expect(speak?.body.payload).toBe(otaChairQuestion);
+  recognitionTurn(f, "確認しますので、少々お待ちください。", 3);
+  await f.b.systemActions;
+  await ackCompletion(f, speak.body.client_state);
+  expect(f.b.controller.hold).toBeTruthy();
+  expect(
+    f.network.filter((n: any) => n.url.endsWith("/playback_stop")),
+  ).toHaveLength(1);
+  expect(f.b.context.latest_task_request).toMatchObject({
+    interrupted: true,
+    playback_completed_at: null,
+  });
+});
+
+it("rechecks recipient speech after reserving recovered playback and before dispatch", async () => {
+  const f = await otaDialogueFixture();
+  const id = "recover-with-reservation-race";
+  await startOversizedReply(f, id);
+  const transact = f.storage.transaction.bind(f.storage);
+  let release!: () => void;
+  let notify!: () => void;
+  const reserved = new Promise<void>((resolve) => (notify = resolve));
+  const paused = new Promise<void>((resolve) => (release = resolve));
+  f.storage.transaction = async (fn: any) => {
+    const reservation = await transact(fn);
+    notify();
+    await paused;
+    return reservation;
+  };
+  await finishOversizedReply(f, id);
+  await reserved;
+  recognitionTurn(f, "いいえ、何をお出しになりますか？", 3);
+  release();
+  await f.b.systemActions;
+  expect(f.network.some((n: any) => n.url.endsWith("/speak"))).toBe(false);
+  expect(f.b.context.latest_task_request?.playback_completed_at).toBeFalsy();
+});
+
 it("treats hai after a completed question as an answer even when its playback ACK is delayed", async () => {
   const f = await dialogueFixture();
   await f.generate("question", "予約は明日の18時でよろしいですか。");
@@ -2740,6 +2952,7 @@ function ackCompletion(
   f: any,
   state = f.b.context.initial_ack.state,
   status = "completed",
+  callControlId = "bound-call",
 ) {
   return f.b.onWebhook({
     id: crypto.randomUUID(),
@@ -2747,7 +2960,7 @@ function ackCompletion(
     occurred_at: new Date(f.advance(0)).toISOString(),
     payload: {
       connection_id: f.env.VOICE_APP_ID,
-      call_control_id: "bound-call",
+      call_control_id: callControlId,
       client_state: state,
       status,
     },

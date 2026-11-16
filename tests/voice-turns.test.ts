@@ -11,6 +11,12 @@ it("distinguishes pure audibility checks from task questions, corrections, holds
     "お声届いておりますでしょうか？",
     "お客様、お声は届いておりますでしょうか?Apple丸の内につながっております。",
     "客様お声は届いておりますでしょうか?丸土地につながっております。",
+    "電話つながっております。お声届いておりますか?",
+    "お電話つながっております。お声届いておりますか?",
+    "お客様、これ届いておりますか?",
+    "聞こえますでしょうか?",
+    "ただいま、こちらにお声が届いておりませんですが、お客様ましたでしょうか?",
+    "恐れ入りますただ、今こちらにお声が届いておりませんが、",
   ])
     expect(isAudibilityCheck(text), text).toBe(true);
   for (const text of [
@@ -23,6 +29,12 @@ it("distinguishes pure audibility checks from task questions, corrections, holds
     "『もしもし』と言っていました。",
     "はい、予約を変更してください。",
     "お声は届いていますか？支払いを承認しているところです。",
+    "お電話つながっております。お待ちください。お声届いておりますか?",
+    "お電話つながっております。回収を申し込まれますか?",
+    "こちらにお声が届いておりませんが、収集を申し込みますか?",
+    "お電話つながっております。",
+    "お客様。",
+    "お声届いておりますか? 違います、別のセンターにつながっております。",
   ])
     expect(isAudibilityCheck(text), text).toBe(false);
 });

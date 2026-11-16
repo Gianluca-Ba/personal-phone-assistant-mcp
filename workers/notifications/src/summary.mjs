@@ -369,9 +369,13 @@ export async function buildSummary(row, messages, options = {}) {
     run = options.infer;
   const outbound = row.direction === "outbound";
   const silent = outbound && options.voiceEvidence?.state === "no_model_audio";
+  const modelAudioAbsent =
+    silent ||
+    (outbound &&
+      options.voiceEvidence?.state === "carrier_task_speech_completed");
   let x;
   const extractionSources = sources.length
-    ? silent
+    ? modelAudioAbsent
       ? sources.filter((s) => s.role !== "assistant")
       : sources
     : row.summary_it?.trim()
@@ -501,7 +505,10 @@ export async function buildSummary(row, messages, options = {}) {
     turns.push(
       ...translated.map((t, i) =>
         outbound && sources[i].role === "assistant"
-          ? { ...t, delivery: silent ? "not_transmitted" : "unverified" }
+          ? {
+              ...t,
+              delivery: modelAudioAbsent ? "not_transmitted" : "unverified",
+            }
           : t,
       ),
     );

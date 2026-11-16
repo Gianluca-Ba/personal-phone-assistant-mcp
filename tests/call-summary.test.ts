@@ -552,6 +552,32 @@ describe("L'ARTE false-confirmation regression", () => {
     expect(email.text).toContain("Generated text; not transmitted");
     expect(email.html).toContain("Generated text; not transmitted");
   });
+  it("uses recipient answers after separate carrier speech while labeling unplayed model turns", async () => {
+    const s = await buildSummary(row, messages, {
+      complete: true,
+      voiceEvidence: { state: "carrier_task_speech_completed" },
+      infer: async (system: string, input: any) => {
+        if (!system.includes("Translate EVERY"))
+          expect(input.turns.map((t: any) => t.role)).toEqual(["user"]);
+        return infer(system, input);
+      },
+    });
+    expect(s.task_outcome).toBe("partially_successful");
+    expect(s.confirmed_facts).toEqual(["Prodotto esaurito"]);
+    expect(s.transcript.turns[0].delivery).toBe("not_transmitted");
+
+    const unresolved = await buildSummary(row, [greeting, proposal], {
+      complete: true,
+      voiceEvidence: { state: "carrier_task_speech_completed" },
+      infer: async (system: string) =>
+        system.includes("Translate EVERY")
+          ? { speaker: "Other Party", english: "Available source text." }
+          : falseResult(),
+    });
+    expect(unresolved.task_outcome).toBe("unresolved");
+    expect(unresolved.title_it).toBe("Esito della richiesta non verificato");
+    expect(unresolved.confirmed_facts).toEqual([]);
+  });
   it("does not resurrect a legacy false confirmation when no transcript exists", async () => {
     const s = await buildSummary(
       { ...row, summary_it: falseResult().summary_it },
@@ -615,6 +641,27 @@ describe("L'ARTE false-confirmation regression", () => {
     const read = (data: any) =>
       fetchVoiceEvidence({}, r, async () => Response.json({ data }));
     expect(await read(original)).toEqual({ state: "no_model_audio" });
+    const withCompletedTaskSpeech = (count: unknown) => ({
+      ...original,
+      metadata: {
+        ...original.metadata,
+        voice_output_audit: JSON.stringify({
+          released_pcm_bytes: 0,
+          released_responses: 0,
+          completed_task_speech: count,
+        }),
+      },
+    });
+    expect(await read(withCompletedTaskSpeech(1))).toEqual({
+      state: "carrier_task_speech_completed",
+    });
+    expect(await read(withCompletedTaskSpeech(0))).toEqual({
+      state: "no_model_audio",
+    });
+    for (const invalid of [-1, 0.5, "1", null])
+      expect(await read(withCompletedTaskSpeech(invalid))).toEqual({
+        state: "unavailable",
+      });
     for (const m of [
       { outbound_request_id: "other" },
       { voice_output_audit_final: "false" },
