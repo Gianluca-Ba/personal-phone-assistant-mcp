@@ -361,7 +361,12 @@ export class CallController {
       }
       this.replayCursor = null;
       const countMatch = fragment.match(/次の([2-9])(?:つ|個)/);
+      const closingCourtesy =
+        this.playFarewell &&
+        this.suspendedClosing?.pending &&
+        isClosingAcknowledgement(fragment);
       const interruptedMenu =
+        closingCourtesy ||
         isHoldReturn(fragment) ||
         isHoldRequest(fragment) ||
         isBackchannel(fragment) ||
@@ -401,7 +406,7 @@ export class CallController {
       const previousMenu = this.menu;
       if (
         (isBackchannel(text) ||
-          (this.systemFarewellStarted && isClosingAcknowledgement(fragment)) ||
+          closingCourtesy ||
           ((this.hold || this.holdExpired) && !holdReturnText(fragment))) &&
         this.suspendedClosing
       ) {

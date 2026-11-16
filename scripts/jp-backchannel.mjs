@@ -18,11 +18,19 @@ export const isClosingAcknowledgement = (text) => {
   const value = normalizeJapaneseTurn(text);
   return (
     value.length <= 160 &&
-    /^(?:(?:はい|ええ|どうも|それでは|では|こちらこそ|恐れ入ります|恐縮です|承知しました|かしこまりました|ありがとうございます|ありがとうございました|お世話になりました|よろしくお願いします|よろしくお願いいたします|失礼します|失礼いたします|失礼致します|失礼いします|さようなら|さよなら)[。、,!！\s]*)+$/.test(
+    /^(?:(?:はい|ええ|どうも|それでは|では|こちらこそ|恐れ入ります|恐縮です|承知しました|かしこまりました|ありがとうございます|ありがとうございました|お世話になりました|よろしくお願いします|よろしくお願いいたします|失礼します|失礼いたします|失礼致します|失礼いします|さようなら|さよなら|お電話ありがとうございました|(?:お申し込み|ご利用)(?:される際は|の際は|を)お待ちしております)[。、,!！\s]*)+$/.test(
       value,
     )
   );
 };
+
+// Starting a server farewell requires more than a courtesy or thanks alone.
+// Check the full turn so a goodbye followed by a question cannot close it.
+export const isRecipientFarewell = (text) =>
+  isClosingAcknowledgement(text) &&
+  /失礼(?:いた|致|い)?します|さよ(?:う)?なら|お電話ありがとうございました/.test(
+    normalizeJapaneseTurn(text),
+  );
 
 // Explicit conversational cues only. These do not authorize any action.
 const holdRequest =

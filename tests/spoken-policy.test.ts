@@ -136,6 +136,30 @@ it("replaces the model's first acknowledgement rule when the system owns pickup,
 });
 
 it.each([false, true])(
+  "keeps a factual fee enquiry short and separate from an application (system pickup: %s)",
+  (systemInitialAck) => {
+    const task =
+      "Find out whether the chair base with its gas cylinder attached is accepted and how much collection costs. Do not apply for collection.";
+    const policy = composeOutboundTask(task, { systemInitialAck });
+    expect(policy).toContain(JSON.stringify({ authorized_task: task }));
+    expect(policy).toContain("Answer the recipient's actual question first");
+    expect(policy).toContain("今回は料金の確認だけです。");
+    expect(policy).toContain(
+      "A routine intake question does not authorize an application or reservation",
+    );
+    expect(policy).toContain("one short, complete answer");
+    expect(policy).toContain("generic 内容は理解しました");
+    expect(policy).toContain(
+      "An explicit final goodbye ends the conversation without establishing task success",
+    );
+    expect(policy).toContain(
+      "During an explicit goodbye, stay silent and leave missing information unresolved",
+    );
+    expect(speechViolation("今回は料金の確認だけです。")).toBeNull();
+  },
+);
+
+it.each([false, true])(
   "keeps rescheduling distinct from a new booking and preserves every authorized limit (system pickup: %s)",
   (systemInitialAck) => {
     const task =

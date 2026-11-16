@@ -2,9 +2,8 @@ import { afterEach, expect, it } from "vitest";
 const { createOfflineVoiceFixture } = await import(
   new URL("../scripts/offline-voice-fixture.mjs", import.meta.url).href
 );
-const { isClosingAcknowledgement, isHoldRequest } = await import(
-  new URL("../scripts/jp-backchannel.mjs", import.meta.url).href
-);
+const { isClosingAcknowledgement, isHoldRequest, isRecipientFarewell } =
+  await import(new URL("../scripts/jp-backchannel.mjs", import.meta.url).href);
 const fixtures: any[] = [];
 afterEach(async () => {
   for (const f of fixtures.splice(0)) await f.cleanup();
@@ -369,6 +368,209 @@ it("forwards the same courtesy normally before any closing request", async () =>
   expect(f.b.voice.frames.some((x: any) => x.item?.role === "user")).toBe(true);
   expect(actions(f, "hangup")).toHaveLength(0);
 });
+
+const otaFarewell =
+  "はい、ありがとうございます。ではお申し込みされる際はお待ちしております。お電話ありがとうございました";
+
+it("recognizes a whole recipient farewell without interpreting ordinary courtesy as a signal to end", () => {
+  for (const text of [otaFarewell, "では、失礼いたします。"])
+    expect(isRecipientFarewell(text), text).toBe(true);
+  for (const text of [
+    "はい、ありがとうございました。",
+    "お電話ありがとうございます。",
+    "お電話ありがとうございました。少々お待ちください。",
+    "では失礼します。その前に料金を確認していただけますか？",
+    "『お電話ありがとうございました』という録音です。",
+  ])
+    expect(isRecipientFarewell(text), text).toBe(false);
+});
+
+async function otaInformationCall() {
+  const f = await createOfflineVoiceFixture({
+    destination: "+81366317050",
+    instructions:
+      "Ask the approved waste collection fee and confirm whether the gas cylinder may remain attached.",
+  });
+  fixtures.push(f);
+  await f.recipient("もしもし。ご用件をお伺いします。");
+  f.advance(800);
+  await f.generate("played-price-question", "収集の手数料はいくらですか。");
+  const mark = f.b.marks.byResponse.get("played-price-question");
+  expect(mark).toBeTruthy();
+  // A provider response can be drafted and discarded while the earlier
+  // playback mark is still in flight. It does not replace the audible turn.
+  f.b.activity.active = true;
+  await f.generate(
+    "unplayed-cylinder-question",
+    "ガスシリンダーが付いたままでも出せますか。",
+  );
+  f.advance(2100);
+  f.b.flushBufferedResponses();
+  f.b.activity.active = false;
+  expect(f.b.context.latest_task_request.released_at).toBeNull();
+  expect(f.b.marks.acknowledge(mark)).toBe(true);
+  await f.recipient(
+    "10キロを超えなければ三百円でのお受けとなります。超える場合は重さを教えていただけますか？",
+  );
+  expect(f.b.context.latest_played_task_request).toMatchObject({
+    playback_completed_at: expect.any(Number),
+    recipient_answer_at: expect.any(Number),
+  });
+  expect(f.b.context.latest_task_request.recipient_answer_at).toBeNull();
+  return f;
+}
+
+it("honors a farewell after a fully played message with no task question", async () => {
+  const f = await createOfflineVoiceFixture({
+    instructions: "Leave a message that arrival will be later today.",
+  });
+  fixtures.push(f);
+  await f.recipient("もしもし。ご用件をお伺いします。");
+  await f.recipient("お電話ありがとうございました。");
+  expect(f.b.controller.pending).toBeNull();
+  await f.generate("sent-message", "今日の到着が少し遅れます。");
+  expect(f.b.marks.acknowledge(f.b.marks.byResponse.get("sent-message"))).toBe(
+    true,
+  );
+  expect(f.b.context.latest_played_task_request).toBeUndefined();
+  await f.recipient("お電話ありがとうございました。");
+  f.advance(750);
+  await f.b.checkDialogue();
+  expect(actions(f, "speak")).toHaveLength(1);
+  await complete(f);
+  f.advance(250);
+  await f.b.checkDialogue();
+  expect(actions(f, "hangup")).toHaveLength(1);
+  expect(f.b.context.close_outcome).toBe("unspecified");
+});
+
+it("ends the Ōta call after the recipient's explicit farewell without turning an unplayed question into a confirmation", async () => {
+  const f = await otaInformationCall();
+  await f.b.onVoice({
+    type: "conversation.item.created",
+    item: {
+      type: "function_call",
+      call_id: "unplayed-confirmation",
+      name: "finish_call_after_goodbye",
+      arguments: JSON.stringify({ outcome: "confirmed" }),
+    },
+  });
+  const result = f.b.voice.frames.find(
+    (frame: any) => frame.item?.call_id === "unplayed-confirmation",
+  );
+  expect(JSON.parse(result.item.output)).toMatchObject({
+    ok: false,
+    latest_request_delivery: "not_released",
+  });
+  await f.recipient("ありがとうございます。");
+  expect(f.b.controller.pending).toBeNull();
+  await f.recipient(otaFarewell);
+  expect(f.b.controller.pending).toMatchObject({
+    reason: "recipient_farewell",
+    outcome: "unspecified",
+  });
+  await f.b.onVoice({
+    type: "conversation.item.created",
+    item: {
+      type: "function_call",
+      call_id: "post-farewell-model-retry",
+      name: "finish_call_after_goodbye",
+      arguments: JSON.stringify({ outcome: "refused" }),
+    },
+  });
+  const retry = f.b.voice.frames.find(
+    (frame: any) => frame.item?.call_id === "post-farewell-model-retry",
+  );
+  expect(JSON.parse(retry.item.output)).toMatchObject({
+    ok: false,
+    reason: "CLOSING_PENDING",
+  });
+  expect(f.b.context.controlled_close_requested).toBe(true);
+  f.advance(749);
+  await f.b.checkDialogue();
+  expect(actions(f, "speak")).toHaveLength(0);
+  f.advance(1);
+  await f.b.checkDialogue();
+  expect(actions(f, "speak")).toHaveLength(1);
+  f.advance(3500);
+  await f.b.checkDialogue();
+  expect(actions(f, "hangup")).toHaveLength(0);
+  await complete(f);
+  f.advance(249);
+  await f.b.checkDialogue();
+  expect(actions(f, "hangup")).toHaveLength(0);
+  f.advance(1);
+  await Promise.all([f.b.checkDialogue(), f.b.checkDialogue()]);
+  expect(actions(f, "hangup")).toHaveLength(1);
+  expect(f.b.context.close_outcome).toBe("unspecified");
+});
+
+it.each([
+  "いえ、料金を訂正します。",
+  "少々お待ちください。",
+  "その前に質問があります。",
+])(
+  "cancels an automatic farewell when the recipient resumes with %s",
+  async (text) => {
+    const f = await otaInformationCall();
+    await f.recipient(otaFarewell);
+    f.advance(750);
+    await f.b.checkDialogue();
+    expect(actions(f, "speak")).toHaveLength(1);
+    await f.recipient(text);
+    expect(f.b.context.controlled_closing.cancelled).toBe(true);
+    expect(actions(f, "playback_stop")).toHaveLength(1);
+    await complete(f);
+    f.advance(3000);
+    await f.b.checkDialogue();
+    expect(actions(f, "hangup")).toHaveLength(0);
+  },
+);
+
+it("keeps the recipient on the line when a correction follows the farewell in the same turn", async () => {
+  const f = await otaInformationCall();
+  await f.recipient(otaFarewell + "。その前に重さを教えていただけますか？");
+  f.advance(1000);
+  await f.b.checkDialogue();
+  expect(actions(f, "speak")).toHaveLength(0);
+  expect(actions(f, "hangup")).toHaveLength(0);
+});
+
+it.each(["はい、失礼いたします。", "訂正です。もう一つ質問があります。"])(
+  "defers a reserved automatic farewell when the recipient starts speaking: %s",
+  async (text) => {
+    const f = await otaInformationCall();
+    await f.recipient(otaFarewell);
+    const voiceAPI = f.b.voiceAPI.bind(f.b);
+    f.b.voiceAPI = (action: string, body: any, op: string, permitted: any) =>
+      voiceAPI(
+        action,
+        body,
+        op,
+        action === "speak"
+          ? () => {
+              f.b.beginTurn();
+              return permitted();
+            }
+          : permitted,
+      );
+    f.advance(750);
+    await f.b.checkDialogue();
+    f.b.voiceAPI = voiceAPI;
+    expect(f.b.controller.speaking).toBe(true);
+    expect(actions(f, "speak")).toHaveLength(0);
+    expect(actions(f, "playback_stop")).toHaveLength(0);
+    await f.recipient(text);
+    f.advance(750);
+    await f.b.checkDialogue();
+    const courtesy = isRecipientFarewell(text);
+    expect(actions(f, "speak")).toHaveLength(courtesy ? 1 : 0);
+    if (courtesy) await complete(f);
+    f.advance(250);
+    await f.b.checkDialogue();
+    expect(actions(f, "hangup")).toHaveLength(courtesy ? 1 : 0);
+  },
+);
 
 it.each(["はい、失礼します。", "その前に質問があります。"])(
   "rechecks late recipient speech before dispatching the reserved hangup: %s",

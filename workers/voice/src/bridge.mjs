@@ -13,12 +13,16 @@ import {
   playedAppointmentQuestion,
   recipientAppointmentOffer,
 } from "./appointment-evidence.mjs";
-import { holdReturnText } from "../../../scripts/jp-recipient-evidence.mjs";
+import {
+  holdReturnText,
+  substantiveAnswer,
+} from "../../../scripts/jp-recipient-evidence.mjs";
 import { SilenceWatchdog } from "./silence.mjs";
 import {
   isBackchannel,
   isClosingAcknowledgement,
   isHoldFiller,
+  isRecipientFarewell,
   isRoutingHold,
 } from "../../../scripts/jp-backchannel.mjs";
 import { CallController } from "../../../scripts/jp-call-controller.mjs";
@@ -35,6 +39,24 @@ const expectsRecipientAnswer = (text) =>
   /でしょうか|ですか|ますか|[?？]|(?:変更|予約|取消|キャンセル|手配|確保|注文|申込|申請|確認).{0,80}(?:お願い(?:します|いたします)|(?:して|を)(?:ください|下さい))/.test(
     text,
   );
+// Transcription can combine a factual answer with a new question. Only
+// complete declarative evidence before that question can answer the request.
+const answersPlayedQuestion = (text) => {
+  if (!expectsRecipientAnswer(text)) return true;
+  if (/[「」『』“”"]/.test(text)) return false;
+  return text
+    .normalize("NFKC")
+    .split("。")
+    .slice(0, -1)
+    .some(
+      (clause) =>
+        !expectsRecipientAnswer(clause) &&
+        (substantiveAnswer(clause) ||
+          /(?:\d{1,7}|[〇零一二三四五六七八九十百千万]+)円(?:(?:で(?:の)?|に)?(?:お受け)?(?:と?なります)|です|でございます)(?:ね)?\s*$/.test(
+            clause,
+          )),
+    );
+};
 // Match the WHOLE observed interim. A routing sentence followed by an unknown
 // suffix, greeting or question must retain the normal recipient speech guard.
 const routingOnlyInterim = (text) =>
@@ -729,13 +751,17 @@ export class VoiceBridge {
     );
   }
   async playControlledFarewell(outcome, op) {
+    const c = this.controller;
+    const pending = c.pending;
+    if (!pending) return;
     if (this.initialAckPending()) await this.cancelInitialAck();
     if (this.taskSpeechPending()) await this.cancelTaskSpeech();
     if (this.context.task_speech?.stop_unconfirmed) return;
     // The model never supplies the farewell audio in the controlled route.
     this.suppressCurrentResponse("controlled_farewell");
     const generation = (this.context.farewell_generation ?? 0) + 1;
-    if (generation > 3) throw Error("Farewell interruption limit");
+    const dispatchCount = this.context.farewell_dispatch_count ?? 0;
+    if (dispatchCount >= 3) throw Error("Farewell interruption limit");
     this.context.farewell_generation = generation;
     this.observeClosurePhase("farewell_requested");
     const state = Buffer.from(
@@ -746,7 +772,13 @@ export class VoiceBridge {
         token: uuid(),
       }),
     ).toString("base64");
-    const closing = { state, outcome, cancelled: false, completed: false };
+    const closing = {
+      state,
+      outcome,
+      cancelled: false,
+      completed: false,
+      dispatched: false,
+    };
     this.context.controlled_closing = closing;
     await this.persist();
     if (
@@ -755,6 +787,31 @@ export class VoiceBridge {
       this.context.controlled_closing !== closing
     )
       return;
+    const permitted = () => {
+      const now = this.now();
+      const staleRoutingAudio =
+        pending?.reason === "hold_timeout" &&
+        c.holdExpiry?.kind === "routing" &&
+        c.routingHoldAudioOnly === true &&
+        this.routingWait() &&
+        this.recipientInterim?.waitOnly &&
+        now - this.recipientInterim.changedAt >= 5000;
+      return (
+        !this.ended &&
+        !this.failing &&
+        !closing.cancelled &&
+        this.context.controlled_closing === closing &&
+        c.pending === pending &&
+        !c.closingBlocked &&
+        (staleRoutingAudio ||
+          (!c.speaking &&
+            !this.turnOpen &&
+            !this.activity?.active &&
+            now >= c.acousticGuardUntil &&
+            c.lastSpeechEnd !== null &&
+            now - c.lastSpeechEnd >= 750))
+      );
+    };
     const result = await this.systemVoiceAction(
       "speak",
       {
@@ -765,11 +822,27 @@ export class VoiceBridge {
         client_state: state,
       },
       "closing:" + op.operationId + ":" + generation,
-      () =>
-        !this.ended &&
-        !closing.cancelled &&
-        this.context.controlled_closing === closing,
+      permitted,
+      () => {
+        if (!permitted()) return false;
+        closing.dispatched = true;
+        this.context.farewell_dispatch_count = dispatchCount + 1;
+        return true;
+      },
     );
+    if (result.skipped || result.reason === "DISPATCH_DEFERRED") {
+      if (!closing.cancelled && this.context.controlled_closing === closing) {
+        closing.cancelled = true;
+        c.systemFarewellStarted = false;
+        // tick() required playback acknowledgement before reserving this
+        // farewell. No new audio was dispatched, so restore that boundary.
+        c.playbackAck = true;
+        if (c.suspendedClosing?.pending === pending)
+          c.suspendedClosing.playbackAck = true;
+        await this.persist();
+      }
+      return;
+    }
     if (result.ok && !result.skipped)
       this.observeClosurePhase("farewell_accepted");
     if (!result.ok && !closing.cancelled)
@@ -824,13 +897,14 @@ export class VoiceBridge {
     current.cancelled = true;
     clearTimeout(this.controlledFarewellDeadline);
     this.controller.event({ type: "system_farewell_cancelled" });
-    const stop = !alreadyPlayed
-      ? this.systemVoiceAction(
-          "playback_stop",
-          { stop: "all" },
-          "cancel-closing:" + sha256(current.state),
-        )
-      : Promise.resolve();
+    const stop =
+      !alreadyPlayed && current.dispatched !== false
+        ? this.systemVoiceAction(
+            "playback_stop",
+            { stop: "all" },
+            "cancel-closing:" + sha256(current.state),
+          )
+        : Promise.resolve();
     await this.persist();
     await stop;
   }
@@ -984,6 +1058,47 @@ export class VoiceBridge {
       isBackchannel(text)
     );
   }
+  deferBufferedBackchannel(text) {
+    if (!isBackchannel(text)) return false;
+    const response = this.responses.get(this.controller.responseId);
+    const pendingAnswer = [
+      this.context.latest_task_request,
+      this.context.latest_played_task_request,
+    ].some(
+      (request) =>
+        request?.released_at &&
+        !request.interrupted &&
+        !request.recipient_answer_at,
+    );
+    // The previous real turn already reached the model. A short listening
+    // cue need not invalidate its reply while no question awaits an answer.
+    return !!(
+      response?.replyToTurn &&
+      this.controller.responseId !==
+        this.context.initial_dialogue_response?.id &&
+      response.replyToTurn === this.forwardedRecipientTurn &&
+      this.recipientTurnSequence > response.replyToTurn &&
+      !response.rendered &&
+      !response.suppressed &&
+      !response.finalized &&
+      this.now() - response.createdAt < 15000 &&
+      !this.controller.assistantQuestionPending &&
+      !pendingAnswer &&
+      !this.modelMustRemainSilent()
+    );
+  }
+  speechStartReady() {
+    if (this.turnOpen || this.controller.speaking || this.activity?.active)
+      return false;
+    return (
+      this.now() >= this.controller.acousticGuardUntil ||
+      // MediaActivity already observed quiet. Only a final from the same
+      // acoustic turn can replace the extra energy-only safety interval.
+      (!!this.finalAudioEnd &&
+        this.finalAudioEnd.epoch === this.recipientAudioEpoch &&
+        this.finalAudioEnd.lastVoice === this.activity?.lastVoice)
+    );
+  }
   cancelOutput() {
     if (this.cancelledForTurn) return;
     this.cancelledForTurn = true;
@@ -1135,6 +1250,28 @@ export class VoiceBridge {
       operationId: "server-close:" + reason,
     };
     this.suppressCurrentResponse(reason);
+  }
+  recordTaskPlayback(request) {
+    if (
+      !request?.released_at ||
+      request.interrupted ||
+      request.playback_completed_at
+    )
+      return;
+    request.playback_completed_at = this.now();
+    request.playback_after_turn = this.recipientTurnSequence ?? 0;
+    if (
+      request.response_sequence <
+      (this.context.latest_played_task_request?.response_sequence ?? 0)
+    )
+      return;
+    this.context.latest_played_task_request = request;
+    this.context.appointment_played_question = request.appointment_candidate
+      ? {
+          slot: request.appointment_candidate,
+          after_turn: request.playback_after_turn,
+        }
+      : null;
   }
   unansweredConfirmation() {
     const request = this.context.latest_task_request;
@@ -1298,12 +1435,9 @@ export class VoiceBridge {
       this.controller.responseId === id &&
       this.context.latest_task_request === request &&
       !this.modelMustRemainSilent({ allowTaskSpeech: true }) &&
-      !this.turnOpen &&
-      !this.controller.speaking &&
-      !this.activity?.active &&
+      this.speechStartReady() &&
       !this.marks.pending.size &&
-      this.controller.playback.remaining(this.now()) <= 0 &&
-      this.now() >= this.controller.acousticGuardUntil;
+      this.controller.playback.remaining(this.now()) <= 0;
     const result = await this.systemVoiceAction(
       "speak",
       {
@@ -1352,9 +1486,7 @@ export class VoiceBridge {
       this.ended ||
       this.failing ||
       this.modelMustRemainSilent() ||
-      this.controller.speaking ||
-      this.activity?.active ||
-      this.now() < this.controller.acousticGuardUntil ||
+      !this.speechStartReady() ||
       this.marks.pending.size ||
       this.controller.playback.remaining(this.now()) > 0
     )
@@ -1378,6 +1510,12 @@ export class VoiceBridge {
     };
     this.context.initial_ack = ack;
     await this.persist();
+    const permitted = () =>
+      !this.ended &&
+      !this.failing &&
+      !ack.cancelled &&
+      !this.modelMustRemainSilent() &&
+      this.speechStartReady();
     const result = await this.systemVoiceAction(
       "speak",
       {
@@ -1388,15 +1526,11 @@ export class VoiceBridge {
         client_state: state,
       },
       "initial-ack-once",
-      () =>
-        !this.ended &&
-        !this.failing &&
-        !ack.cancelled &&
-        !this.modelMustRemainSilent() &&
-        !this.controller.speaking &&
-        !this.activity?.active,
+      permitted,
+      permitted,
     );
-    if (result.skipped) ack.cancelled = true;
+    if (result.skipped || result.reason === "DISPATCH_DEFERRED")
+      ack.cancelled = true;
     else if (result.ok) ack.accepted_at = this.now();
     else if (!ack.cancelled && !this.ended) {
       await this.cancelInitialAck();
@@ -1444,7 +1578,7 @@ export class VoiceBridge {
       response.sequence >=
         (this.context.latest_task_request?.response_sequence ?? 0)
     )
-      this.context.latest_task_request = {
+      this.context.latest_task_request = response.taskRequest = {
         response_digest: sha256(String(id)).slice(0, 16),
         response_sequence: response.sequence,
         released_at: response.rendered > 0 ? this.now() : null,
@@ -1536,12 +1670,12 @@ export class VoiceBridge {
         !this.systemActionsPending &&
         !this.initialAckPending() &&
         !this.activity?.active &&
+        !this.turnOpen &&
         !this.controller.speaking &&
         (!response.recoverSpeech ||
-          (!this.turnOpen &&
+          (this.speechStartReady() &&
             !this.marks.pending.size &&
-            this.controller.playback.remaining(this.now()) <= 0 &&
-            this.now() >= this.controller.acousticGuardUntil))
+            this.controller.playback.remaining(this.now()) <= 0))
       ) {
         this.completeBufferedResponse(id, response, !response.recoverSpeech);
         if (response.recoverSpeech)
@@ -1675,6 +1809,7 @@ export class VoiceBridge {
   beginTurn() {
     if (this.turnOpen) return;
     this.turnOpen = true;
+    this.turnAudioEpoch = this.recipientAudioEpoch;
     this.recipientTurnSequence = (this.recipientTurnSequence ?? 0) + 1;
     this.recipientInterim = null;
     this.controller.routingHoldAudioOnly = false;
@@ -1730,9 +1865,11 @@ export class VoiceBridge {
   }
   closingAcknowledgement(text) {
     return !!(
-      this.context.controlled_closing &&
-      !this.context.controlled_closing.cancelled &&
-      this.controller?.systemFarewellStarted &&
+      this.controller?.playFarewell &&
+      (this.controller.pending ||
+        (this.context.controlled_closing &&
+          !this.context.controlled_closing.cancelled &&
+          this.controller.systemFarewellStarted)) &&
       isClosingAcknowledgement(text)
     );
   }
@@ -1777,6 +1914,23 @@ export class VoiceBridge {
       preserve_hold: preserveRoutingHold,
     });
     const turn = classifyRecipientTurn(text, { overlapped: this.overlapped });
+    const playedRequest = this.context.latest_played_task_request;
+    const afterTaskPlayback =
+      !!playedRequest &&
+      this.recipientTurnSequence > playedRequest.playback_after_turn;
+    const recipientFarewell =
+      this.env.CONTROLLED_FAREWELL === "true" &&
+      !!this.context.dialogue_candidate_observed &&
+      this.dialoguePlaybackTurn !== undefined &&
+      this.recipientTurnSequence > this.dialoguePlaybackTurn &&
+      !wasHeld &&
+      !this.controller.hold &&
+      !this.controller.holdExpired &&
+      !this.controller.menu?.isIvr &&
+      this.context.ivr_progress?.state !== "awaiting_transition" &&
+      !this.routingWait() &&
+      !this.controller.recipientTerminal &&
+      isRecipientFarewell(text);
     const deferredCheck = this.deferInitialAudibilityCheck(text);
     const listening =
       turn.kind === "backchannel" ||
@@ -1784,7 +1938,8 @@ export class VoiceBridge {
       (wasHeld && !returnedText && !this.controller.recipientTerminal) ||
       holdFiller ||
       deferredCheck ||
-      this.deferInitialBackchannel(text);
+      this.deferInitialBackchannel(text) ||
+      this.deferBufferedBackchannel(text);
     if (wasHeld && !returnedText)
       this.context.filtered_hold_turns =
         (this.context.filtered_hold_turns ?? 0) + 1;
@@ -1809,20 +1964,23 @@ export class VoiceBridge {
             )
           : null;
       if (offered) this.context.appointment_offer = offered;
-      const request = this.context.latest_task_request;
+      const latestRequest = this.context.latest_task_request;
       if (
-        request?.playback_completed_at &&
-        !request.interrupted &&
-        this.recipientTurnSequence > request.playback_after_turn &&
+        afterTaskPlayback &&
+        (!latestRequest?.released_at ||
+          latestRequest.response_sequence <= playedRequest.response_sequence) &&
         !isBackchannel(text) &&
         !isClosingAcknowledgement(text) &&
         !isAudibilityCheck(text) &&
         !isHoldFiller(text) &&
         !this.controller.hold &&
         !this.controller.holdExpired &&
-        !expectsRecipientAnswer(text)
-      )
-        request.recipient_answer_at = this.now();
+        answersPlayedQuestion(text)
+      ) {
+        playedRequest.recipient_answer_at = this.now();
+        if (latestRequest?.response_digest === playedRequest.response_digest)
+          latestRequest.recipient_answer_at = playedRequest.recipient_answer_at;
+      }
       if (
         !expiredHoldRepeated &&
         !this.controller.recipientTerminal &&
@@ -1842,6 +2000,12 @@ export class VoiceBridge {
         this.controller.responseActive)
     )
       this.cancelOutput();
+    if (
+      recipientFarewell &&
+      !this.context.controlled_close_requested &&
+      !this.controller.pending
+    )
+      this.requestControlledStop("recipient_farewell");
     if (!wasHeld || returnedText || isRoutingHold(text))
       this.background(this.observeIvrProgress(evidenceText, evidence));
     this.context.filtered_aizuchi =
@@ -1854,7 +2018,8 @@ export class VoiceBridge {
       this.controller.pending
     )
       this.suppressCurrentResponse("recipient_wait_or_close");
-    if (!listening && this.voice?.readyState === 1)
+    if (!listening && !recipientFarewell && this.voice?.readyState === 1) {
+      this.forwardedRecipientTurn = this.recipientTurnSequence;
       this.voice.send(
         JSON.stringify({
           type: "conversation.item.create",
@@ -1865,6 +2030,7 @@ export class VoiceBridge {
           },
         }),
       );
+    }
   }
   async openVoice() {
     if (
@@ -1960,23 +2126,8 @@ export class VoiceBridge {
     this.marks = new PlaybackMarks({
       sendMark: (m) => this.sendMedia(m),
       onPlayed: (responseId) => {
-        const request = this.context.latest_task_request;
-        if (
-          request?.response_digest ===
-            sha256(String(responseId)).slice(0, 16) &&
-          request.released_at &&
-          !request.interrupted
-        ) {
-          request.playback_completed_at = this.now();
-          request.playback_after_turn = this.recipientTurnSequence ?? 0;
-          this.context.appointment_played_question =
-            request.appointment_candidate
-              ? {
-                  slot: request.appointment_candidate,
-                  after_turn: request.playback_after_turn,
-                }
-              : null;
-        }
+        this.dialoguePlaybackTurn = this.recipientTurnSequence ?? 0;
+        this.recordTaskPlayback(this.responses.get(responseId)?.taskRequest);
         if (
           this.context.initial_audio_delivery &&
           this.context.initial_audio_delivery.id === responseId
@@ -1991,6 +2142,7 @@ export class VoiceBridge {
         now: this.now,
         // Energy detects possible barge-in, not a new semantic menu/turn.
         onStart: () => {
+          this.recipientAudioEpoch = (this.recipientAudioEpoch ?? 0) + 1;
           this.controller.acousticGuardUntil = this.now() + 2000;
         },
         onStop: () => {
@@ -1998,6 +2150,7 @@ export class VoiceBridge {
             this.controller.acousticGuardUntil,
             this.now() + 320,
           );
+          this.flushBufferedResponses();
         },
       });
       this.turns = new SttTurns({
@@ -2023,7 +2176,17 @@ export class VoiceBridge {
             this.cancelOutput();
         },
         onFinal: (text) => {
+          this.finalAudioEnd =
+            !this.activity.active &&
+            this.turnAudioEpoch &&
+            this.turnAudioEpoch === this.recipientAudioEpoch
+              ? {
+                  epoch: this.turnAudioEpoch,
+                  lastVoice: this.activity.lastVoice,
+                }
+              : null;
           this.deliverTranscript(text);
+          this.flushBufferedResponses();
         },
         onEnd: ({ hasTranscript }) => {
           if (!hasTranscript && this.turnOpen) {
@@ -2189,6 +2352,7 @@ export class VoiceBridge {
         if (this.responses.size >= 64) throw Error("Response state limit");
       }
       this.responses.set(id, {
+        replyToTurn: this.forwardedRecipientTurn,
         sequence: (this.responseSequence =
           Math.max(
             this.responseSequence ?? 0,
@@ -2398,29 +2562,38 @@ export class VoiceBridge {
       } catch {
         args = null;
       }
-      const confirmationBlock =
-        frame.item.name === "finish_call_after_goodbye" &&
-        ["confirmed", "refused", "wrong_number", "unable_to_proceed"].includes(
-          args?.outcome,
-        ) &&
-        (args.outcome === "confirmed" ||
-          this.context.latest_task_request ||
-          this.responses.get(this.controller.responseId)?.recoverSpeech) &&
-        !this.controller.recipientTerminal &&
-        !this.controller.holdExpired &&
-        !this.context.latest_task_request?.recipient_answer_at
+      const finishing = frame.item.name === "finish_call_after_goodbye";
+      const pending =
+        this.controller?.pending ?? this.controller?.suspendedClosing?.pending;
+      const neutralClosePending =
+        finishing && pending?.reason === "recipient_farewell";
+      const finishBlock = neutralClosePending
+        ? { ok: false, reason: "CLOSING_PENDING", action_not_executed: true }
+        : finishing &&
+            [
+              "confirmed",
+              "refused",
+              "wrong_number",
+              "unable_to_proceed",
+            ].includes(args?.outcome) &&
+            (args.outcome === "confirmed" ||
+              this.context.latest_task_request ||
+              this.responses.get(this.controller.responseId)?.recoverSpeech) &&
+            !this.controller.recipientTerminal &&
+            !this.controller.holdExpired &&
+            !this.context.latest_task_request?.recipient_answer_at
           ? this.unansweredConfirmation()
           : null;
       if (
         this.env.CONTROLLED_FAREWELL === "true" &&
-        frame.item.name === "finish_call_after_goodbye" &&
-        !confirmationBlock
+        finishing &&
+        !finishBlock
       ) {
         this.context.controlled_close_requested = true;
         this.context.closing_request_response = this.controller.responseId;
       }
       const result =
-        confirmationBlock ??
+        finishBlock ??
         (await this.controller.command(
           frame.item.call_id,
           frame.item.name,
@@ -2475,7 +2648,7 @@ export class VoiceBridge {
             .catch(() => {}),
         );
       }
-      if (frame.item.name === "finish_call_after_goodbye" && !result.ok)
+      if (finishing && !result.ok && !neutralClosePending)
         this.context.controlled_close_requested = false;
       if (frame.item.name === "finish_call_after_goodbye" && result.ok)
         this.context.model_requested_outcome = args.outcome;
@@ -2673,14 +2846,8 @@ export class VoiceBridge {
         !request.interrupted
       ) {
         request.released_at = speech.requested_at;
-        request.playback_completed_at = speech.completed_at;
-        request.playback_after_turn = this.recipientTurnSequence ?? 0;
-        this.context.appointment_played_question = request.appointment_candidate
-          ? {
-              slot: request.appointment_candidate,
-              after_turn: request.playback_after_turn,
-            }
-          : null;
+        this.dialoguePlaybackTurn = this.recipientTurnSequence ?? 0;
+        this.recordTaskPlayback(request);
         this.context.output_audit.completed_task_speech =
           (this.context.output_audit.completed_task_speech ?? 0) + 1;
         if (this.controller) this.controller.assistantQuestionPending = true;

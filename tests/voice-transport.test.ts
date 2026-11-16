@@ -1367,6 +1367,77 @@ function recognitionTurn(f: any, text: string, start: number) {
     duration: 0.5,
   });
 }
+it.each(["はい。", "ええ。", "そうですね。"])(
+  "keeps a later buffered reply through a listening cue (%s), without restarting generation",
+  async (cue) => {
+    const f = await dialogueFixture();
+    await f.generate("first-courtesy", "ありがとうございます。");
+    const firstMark = f.media.frames.find((m: any) => m.event === "mark");
+    await f.b.onMedia({
+      event: "mark",
+      stream_id: "stream",
+      mark: firstMark.mark,
+    });
+    f.advance(1000);
+    recognitionTurn(f, "どのようなお品物ですか？", 1);
+    const replies = () =>
+      f.b.voice.frames.filter(
+        (x: any) => x.type === "conversation.item.create",
+      );
+    const before = replies().length;
+    const id = "short-object-description";
+    await f.b.onVoice({ type: "response.created", response: { id } });
+    await f.b.onVoice({
+      type: "response.output_audio.delta",
+      response_id: id,
+      delta: Buffer.alloc(3200).toString("base64"),
+    });
+    f.advance(4000);
+    recognitionTurn(f, cue, 3);
+    expect(replies()).toHaveLength(before);
+    expect(f.b.responses.get(id).suppressed).toBe(false);
+    expect(f.b.responses.get(id).rendered).toBe(0);
+    f.advance(4000);
+    await f.b.onVoice({
+      type: "response.done",
+      response: {
+        id,
+        status: "completed",
+        output: [
+          {
+            content: [{ type: "audio", transcript: "事務椅子の脚だけです。" }],
+          },
+        ],
+      },
+    });
+    const response = f.b.responses.get(id);
+    expect(response.rendered).toBe(3200);
+    expect(response.completedAt - response.createdAt).toBe(8000);
+    expect(response.waitingForQuiet).toBe(false);
+  },
+);
+it.each(["粗大ごみで出せますか。", "回収の予約をお願いします。"])(
+  "forwards a standalone yes when a played request is awaiting an answer (%s)",
+  async (question) => {
+    const f = await dialogueFixture();
+    recognitionTurn(f, "ご用件をどうぞ。", 1);
+    await f.generate("spoken-question", question);
+    const mark = f.media.frames.find((m: any) => m.event === "mark");
+    await f.b.onMedia({ event: "mark", stream_id: "stream", mark: mark.mark });
+    f.advance(1000);
+    await f.b.onVoice({
+      type: "response.created",
+      response: { id: "unsolicited" },
+    });
+    recognitionTurn(f, "はい。", 3);
+    expect(f.b.responses.get("unsolicited").suppressed).toBe(true);
+    expect(
+      f.b.voice.frames.some(
+        (x: any) => x.item?.content?.[0]?.text === "はい。",
+      ),
+    ).toBe(true);
+  },
+);
 it("preserves the first undelivered question through repeated checks during its fourth generation", async () => {
   const f = await firstDeliveredQuestionFixture(true);
   expect(f.b.context.initial_dialogue_response.id).toBe("cancelled-start-0");
@@ -2684,6 +2755,15 @@ it("preserves the original approved task while applying the trusted spoken polic
     "NEVER speak a report",
   );
 });
+function stageControlledFarewell(f: any, outcome: string, operationId: string) {
+  // The low-level adapter is normally called by the controller after quiet.
+  const c = f.b.controller;
+  c.pending = { outcome, operationId };
+  c.lastSpeechEnd = f.advance(0) - 750;
+  c.systemFarewellStarted = true;
+  return f.b.playControlledFarewell(outcome, { operationId });
+}
+
 it("does not speak a farewell cancelled while its persistence is still pending", async () => {
   const f = await dialogueFixture();
   const original = f.b.persist.bind(f.b);
@@ -2695,9 +2775,7 @@ it("does not speak a farewell cancelled while its persistence is still pending",
       await new Promise((r) => (release = r));
     } else await original();
   };
-  const play = f.b.playControlledFarewell("confirmed", {
-    operationId: "race-before-post",
-  });
+  const play = stageControlledFarewell(f, "confirmed", "race-before-post");
   await Promise.resolve();
   await f.b.cancelControlledFarewell();
   release();
@@ -2778,7 +2856,13 @@ it("serializes an old farewell stop before a new farewell generation", async () 
   const dispatched = new Promise((r) => (started = r));
   const actions: string[] = [];
   let first = true;
-  f.b.voiceAPI = async (action: string) => {
+  f.b.voiceAPI = async (
+    action: string,
+    _body: unknown,
+    _operation: string,
+    permitted: () => boolean,
+  ) => {
+    if (!permitted()) return { ok: false, reason: "DISPATCH_DEFERRED" };
     actions.push(action);
     if (action === "speak" && first) {
       first = false;
@@ -2787,14 +2871,14 @@ it("serializes an old farewell stop before a new farewell generation", async () 
     }
     return { ok: true };
   };
-  const old = f.b.playControlledFarewell("unable_to_proceed", {
-    operationId: "closing-reason",
-  });
+  const old = stageControlledFarewell(f, "unable_to_proceed", "closing-reason");
   await dispatched;
   const cancel = f.b.cancelControlledFarewell();
-  const next = f.b.playControlledFarewell("unable_to_proceed", {
-    operationId: "closing-reason",
-  });
+  const next = stageControlledFarewell(
+    f,
+    "unable_to_proceed",
+    "closing-reason",
+  );
   release({ ok: true });
   await Promise.all([old, cancel, next]);
   expect(actions).toEqual(["speak", "playback_stop", "speak"]);
@@ -2806,16 +2890,20 @@ it("bounds a missing controlled-farewell callback without arming a timer after a
   const f = await dialogueFixture();
   let release: any, started: any;
   const dispatched = new Promise((r) => (started = r));
-  f.b.voiceAPI = async (action: string) => {
+  f.b.voiceAPI = async (
+    action: string,
+    _body: unknown,
+    _operation: string,
+    permitted: () => boolean,
+  ) => {
+    if (!permitted()) return { ok: false, reason: "DISPATCH_DEFERRED" };
     if (action === "speak") {
       started();
       return new Promise((r) => (release = r));
     }
     return { ok: true };
   };
-  const play = f.b.playControlledFarewell("confirmed", {
-    operationId: "early-completion",
-  });
+  const play = stageControlledFarewell(f, "confirmed", "early-completion");
   await dispatched;
   f.b.context.controlled_closing.completed = true;
   f.b.context.system_farewell_played = true;
@@ -2828,9 +2916,7 @@ it("bounds a missing controlled-farewell callback without arming a timer after a
   f.b.fail = async (reason: string) => {
     failure = reason;
   };
-  await f.b.playControlledFarewell("confirmed", {
-    operationId: "missing-callback",
-  });
+  await stageControlledFarewell(f, "confirmed", "missing-callback");
   await vi.advanceTimersByTimeAsync(20001);
   expect(failure).toBe("farewell_playback_unconfirmed");
 });
@@ -3055,6 +3141,62 @@ it("retains the acoustic guard and rejects premature or unauthenticated acknowle
   expect(f.b.context.initial_ack.completed_at).toBeNull();
   expect(f.b.initialAckPending()).toBe(true);
 });
+it("starts the pickup acknowledgement after 320 ms of measured quiet and a matching final turn", async () => {
+  const f = await initialAckFixture();
+  const voice = Buffer.alloc(160);
+  f.b.activity.observe(voice);
+  const lastVoiceAt = f.advance(0);
+  const greeting = "もしもし、ご用件をお伺いします。";
+  f.b.turns.accept({ transcript: greeting, is_final: false, start: 1 });
+  await f.b.checkDialogue();
+  expect(f.b.context.initial_ack).toBeUndefined();
+  f.advance(319);
+  f.b.activity.tick();
+  await f.b.checkDialogue();
+  expect(f.b.context.initial_ack).toBeUndefined();
+  f.advance(1);
+  f.b.activity.tick();
+  f.b.turns.accept({
+    transcript: greeting,
+    is_final: true,
+    speech_final: true,
+    start: 1,
+    duration: 0.5,
+  });
+  await f.b.checkDialogue();
+  expect(f.b.context.initial_ack.requested_at - lastVoiceAt).toBe(320);
+  expect(f.b.controller.acousticGuardUntil - lastVoiceAt).toBe(2000);
+});
+it("does not borrow an earlier recognition endpoint after the recipient starts speaking again", async () => {
+  const f = await initialAckFixture();
+  const voice = Buffer.alloc(160);
+  f.b.activity.observe(voice);
+  f.b.turns.accept({ transcript: "もしもし、", is_final: false, start: 1 });
+  f.advance(320);
+  f.b.activity.tick();
+  recognitionTurn(f, "もしもし、ご用件をお伺いします。", 1);
+  f.advance(1);
+  f.b.activity.observe(voice);
+  f.advance(320);
+  f.b.activity.tick();
+  await f.b.checkDialogue();
+  expect(f.b.context.initial_ack).toBeUndefined();
+  f.advance(1680);
+  await f.b.checkDialogue();
+  expect(f.b.context.initial_ack).toBeDefined();
+});
+it("keeps the full guard when a recognition final arrives during acoustic speech", async () => {
+  const f = await initialAckFixture();
+  f.b.activity.observe(Buffer.alloc(160));
+  recognitionTurn(f, "もしもし、ご用件をお伺いします。", 1);
+  f.advance(320);
+  f.b.activity.tick();
+  await f.b.checkDialogue();
+  expect(f.b.context.initial_ack).toBeUndefined();
+  f.advance(1680);
+  await f.b.checkDialogue();
+  expect(f.b.context.initial_ack).toBeDefined();
+});
 it("cancels an initial acknowledgement for a real correction, never replays it, and discards stale task audio", async () => {
   const f = await initialAckFixture();
   f.recipient("もしもし、ご用件をお伺いします。");
@@ -3186,9 +3328,7 @@ it("diagnoses an ended provider conversation after response cancellation and clo
 });
 it("ignores provider conversation end during an active farewell, but diagnoses it after that farewell is cancelled", async () => {
   const f = await initialAckFixture();
-  await f.b.playControlledFarewell("unable_to_proceed", {
-    operationId: "existing-close",
-  });
+  await stageControlledFarewell(f, "unable_to_proceed", "existing-close");
   const event = { type: "error", error: { code: "conversation_ended" } };
   const before = f.network.length;
   await f.b.onVoice(event);
