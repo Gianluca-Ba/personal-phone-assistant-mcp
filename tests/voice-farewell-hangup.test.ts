@@ -90,12 +90,88 @@ function complete(f: any, overrides = {}, id = crypto.randomUUID()) {
     payload: {
       connection_id: f.b.env.VOICE_APP_ID,
       call_control_id: "mock-call",
-      client_state: f.b.context.controlled_closing.state,
+      client_state: f.b.context.controlled_closing?.state,
       status: "completed",
       ...overrides,
     },
   });
 }
+it("replays the Yamato pickup, recovers the question, and closes after the completed farewell", async () => {
+  const f = await createOfflineVoiceFixture({
+    destination: "+815037863333",
+    instructions: "Ask only whether the parcel was delivered.",
+  });
+  fixtures.push(f);
+  f.b.env.OUTBOUND_INITIAL_ACK = "true";
+  f.b.context.answered_at = new Date(f.now()).toISOString();
+  f.b.outputRate = 24000;
+  await f.generate("before-pickup", "荷物は配達済みですか。");
+  expect(f.frames()).toHaveLength(0);
+
+  await f.recipient("はい、大和音です。");
+  await f.b.checkDialogue();
+  const [ack] = actions(f, "speak");
+  expect(ack.body.payload).toBe("はい、よろしくお願いします。");
+  f.advance(2000);
+  await complete(f, { client_state: ack.body.client_state });
+
+  const id = "overlong-question";
+  const question = "荷物は配達済みですか。";
+  await f.b.onVoice({ type: "response.created", response: { id } });
+  await f.b.onVoice({
+    type: "response.output_audio.delta",
+    response_id: id,
+    // Size observed in the real trace. The test audio is synthetic.
+    delta: Buffer.alloc(974880).toString("base64"),
+  });
+  expect(f.frames()).toHaveLength(0);
+  expect(actions(f, "speak")).toHaveLength(1);
+  f.advance(3000);
+  await f.b.onVoice({
+    type: "response.done",
+    response: {
+      id,
+      status: "completed",
+      output: [
+        {
+          content: [
+            {
+              type: "audio",
+              transcript: "お忙しいところ恐れ入ります。" + question,
+            },
+          ],
+        },
+      ],
+    },
+  });
+  await Promise.all(f.jobs.splice(0));
+  const [, enquiry] = actions(f, "speak");
+  expect(enquiry.body.payload).toBe(question);
+  expect(f.frames()).toHaveLength(0);
+  expect(f.b.context.latest_task_request.playback_completed_at).toBeNull();
+  await complete(f, { client_state: enquiry.body.client_state });
+  expect(f.b.context.output_audit.completed_task_speech).toBe(1);
+  await f.recipient("配達済みです。");
+  expect(f.b.context.latest_played_task_request.recipient_answer_at).toBe(
+    f.now(),
+  );
+
+  await f.recipient("お電話ありがとうございました。");
+  f.advance(750);
+  await f.b.checkDialogue();
+  expect(actions(f, "speak")).toHaveLength(3);
+  expect(actions(f, "hangup")).toHaveLength(0);
+  f.advance(1800);
+  await complete(f);
+  f.advance(250);
+  await f.b.checkDialogue();
+  expect(actions(f, "hangup")).toHaveLength(1);
+  expect(f.b.context.close_outcome).toBe("unspecified");
+  expect(actions(f, "send_dtmf")).toHaveLength(0);
+  expect(
+    f.network.some((n: any) => n.url === "https://api.telnyx.com/v2/calls"),
+  ).toBe(false);
+});
 it.each(["confirmed", "refused", "wrong_number", "unable_to_proceed"])(
   "retains a completed farewell across the observed final courtesy and hangs up once (%s)",
   async (outcome) => {

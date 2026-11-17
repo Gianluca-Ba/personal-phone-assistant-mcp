@@ -40,6 +40,28 @@ it("labels a possible human greeting as a candidate, never as proven human conta
     progressEvidence(baseline, "お待たせしました。担当のテストです。"),
   ).toMatchObject({ kind: "human_greeting_candidate" });
 });
+it.each([
+  "はい、ヤマト運輸です。",
+  "はい、大和音です。",
+  "はい。ヤマト運輸でございます！",
+  "はい ﾔﾏﾄ運輸です",
+])("opens dialogue on the short Yamato pickup: %s", (text) => {
+  expect(progressEvidence("", text)).toMatchObject({
+    kind: "human_greeting_candidate",
+  });
+});
+it.each([
+  "ヤマト運輸にお電話いただきありがとうございます。",
+  "こちらはヤマト運輸の自動音声案内です。",
+  "はい、ヤマト運輸です。再配達は一番を押してください。",
+  "はい、大和音です。少々お待ちください。",
+  "担当者におつなぎいたします。はい、ヤマト運輸です。",
+  "録音では「はい、大和音です」と流れました。",
+  "はい、ヤマト運輸ではありません。",
+  "はい、大和市です。",
+])("keeps non-dialogue Yamato turns gated: %s", (text) => {
+  expect(progressEvidence("", text)?.kind).not.toBe("human_greeting_candidate");
+});
 it("does not release a routing hold for an announcement that asks the caller to keep waiting", () => {
   for (const text of [
     "お待たせしました。少々お待ちください。",

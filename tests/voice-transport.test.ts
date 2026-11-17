@@ -895,11 +895,12 @@ it("lets a current IVR sentence finish before the no-transition close, without w
   expect(f.network.filter((n) => n.url.endsWith("/speak"))).toHaveLength(1);
 });
 
-async function dialogueFixture(instructions?: string) {
+async function dialogueFixture(instructions?: string, destination?: string) {
   const f = fixture();
   f.env.EXTERNAL_STT = "true";
   f.env.CONTROLLED_FAREWELL = "true";
   if (instructions) f.row.instructions = instructions;
+  if (destination) f.row.destination_number = destination;
   await f.register();
   const media = new Socket();
   await f.b.attachMedia(media);
@@ -1697,12 +1698,13 @@ async function otaDialogueFixture() {
 async function startOversizedReply(
   f: Awaited<ReturnType<typeof otaDialogueFixture>>,
   id: string,
+  bytes = otaOversizedPcmBytes,
 ) {
   await f.b.onVoice({ type: "response.created", response: { id } });
   await f.b.onVoice({
     type: "response.output_audio.delta",
     response_id: id,
-    delta: Buffer.alloc(otaOversizedPcmBytes).toString("base64"),
+    delta: Buffer.alloc(bytes).toString("base64"),
   });
 }
 
@@ -1783,6 +1785,225 @@ it.each(["final", "audio-done"])(
     ).toHaveLength(1);
   },
 );
+
+const yamatoCourtesy = "お忙しいところ恐れ入ります。";
+const yamatoQuestion = "ヤマト運輸の荷物は本日中に受け取れますか。";
+const yamatoOversizedPcmBytes = 974880;
+
+it.each(["final", "audio-done"])(
+  "recovers a short question after the Yamato pickup and the observed oversized stream (%s)",
+  async (shape) => {
+    const f = await dialogueFixture(
+      "ヤマト運輸に荷物が本日中に受け取れるか聞いてください。",
+      "+815037863333",
+    );
+    f.env.OUTBOUND_INITIAL_ACK = "true";
+    f.b.context.dialogue_candidate_observed = null;
+    f.b.context.answered_at = new Date(f.advance(0)).toISOString();
+    f.b.outputRate = 24000;
+    await f.generate("held-prewarm", "よろしくお願いします。");
+
+    recognitionTurn(f, "はい、大和音です。", 1);
+    f.advance(400);
+    await f.b.checkDialogue();
+    const speaks = () => f.network.filter((n) => n.url.endsWith("/speak"));
+    const modelMedia = () =>
+      f.media.frames.filter((frame) => frame.event === "media");
+    expect(f.b.context.dialogue_candidate_observed).toBeTruthy();
+    expect(speaks().map((action) => action.body.payload)).toEqual([
+      "はい、よろしくお願いします。",
+    ]);
+
+    const id = "yamato-oversized-first-question";
+    await f.b.onVoice({ type: "response.created", response: { id } });
+    await f.b.onVoice({
+      type: "response.output_audio_transcript.delta",
+      response_id: id,
+      delta: yamatoCourtesy + "ヤマト",
+    });
+    for (const bytes of [240000, 480000, yamatoOversizedPcmBytes - 720000]) {
+      await f.b.onVoice({
+        type: "response.output_audio.delta",
+        response_id: id,
+        delta: Buffer.alloc(bytes).toString("base64"),
+      });
+      expect(modelMedia()).toHaveLength(0);
+    }
+    const response = f.b.responses.get(id);
+    expect(response.chunks).toEqual([]);
+    expect(response.bytes).toBe(yamatoOversizedPcmBytes);
+    expect(speaks()).toHaveLength(1);
+    await ackCompletion(f);
+    expect(speaks()).toHaveLength(1);
+    expect(modelMedia()).toHaveLength(0);
+
+    f.b.activity.active = true;
+    if (shape === "audio-done") {
+      await f.b.onVoice({
+        type: "response.output_audio_transcript.delta",
+        response_id: id,
+        delta: yamatoQuestion.slice("ヤマト".length),
+      });
+      await f.b.onVoice({
+        type: "response.output_audio.done",
+        response_id: id,
+      });
+      expect(speaks()).toHaveLength(1);
+    }
+    const done = {
+      type: "response.done",
+      response: {
+        id,
+        status: "completed",
+        output:
+          shape === "final"
+            ? [
+                {
+                  content: [
+                    {
+                      type: "audio",
+                      transcript: yamatoCourtesy + yamatoQuestion,
+                    },
+                  ],
+                },
+              ]
+            : [],
+      },
+    };
+    await f.b.onVoice(done);
+    expect(speaks()).toHaveLength(1);
+    expect(modelMedia()).toHaveLength(0);
+
+    f.b.activity.active = false;
+    f.advance(300);
+    await f.b.checkDialogue();
+    await f.b.systemActions;
+    expect(speaks().map((action) => action.body.payload)).toEqual([
+      "はい、よろしくお願いします。",
+      yamatoQuestion,
+    ]);
+    const state = speaks()[1].body.client_state;
+    const decoded = JSON.parse(Buffer.from(state, "base64").toString());
+    expect(decoded.phase).toBe("task_speech");
+    expect(f.b.context.latest_task_request?.playback_completed_at).toBeFalsy();
+    expect(f.b.context.output_audit.completed_task_speech ?? 0).toBe(0);
+    await ackCompletion(f, f.b.context.initial_ack.state);
+    expect(f.b.context.latest_task_request?.playback_completed_at).toBeFalsy();
+    await ackCompletion(f, state);
+    expect(f.b.context.latest_task_request?.playback_completed_at).toBeTruthy();
+    await ackCompletion(f, state);
+    await f.b.onVoice(done);
+    expect(f.b.context.output_audit).toMatchObject({
+      released_pcm_bytes: 0,
+      completed_task_speech: 1,
+    });
+    expect(modelMedia()).toHaveLength(0);
+    expect(speaks()).toHaveLength(2);
+    recognitionTurn(f, "はい、本日中にお届けします。", 2);
+    expect(f.b.context.latest_task_request?.recipient_answer_at).toBeTruthy();
+  },
+);
+
+it.each([
+  { label: "the original unfinished prefix", text: yamatoCourtesy + "ヤマト" },
+  {
+    label: "a cancelled provider response",
+    text: yamatoQuestion,
+    status: "cancelled",
+  },
+  {
+    label: "transcript deltas without a final marker",
+    text: yamatoQuestion,
+    shape: "delta",
+  },
+  {
+    label: "a private summary after the courtesy",
+    text: yamatoCourtesy + "Call Summary: unable_to_proceed。" + yamatoQuestion,
+  },
+  {
+    label: "two complete questions",
+    text: yamatoCourtesy + yamatoQuestion + "配達時間は分かりますか。",
+  },
+  {
+    label: "an unapproved sentence before the question",
+    text: "お届け先を変更します。" + yamatoQuestion,
+  },
+  {
+    label: "a generation rejected by its timeout",
+    text: yamatoQuestion,
+    expiry: "watchdog",
+  },
+  {
+    label: "a completed response arriving after the generation deadline",
+    text: yamatoQuestion,
+    expiry: "late-done",
+  },
+])(
+  "keeps the Yamato-sized stream silent for $label",
+  async ({ text, status, shape, expiry }) => {
+    const f = await otaDialogueFixture();
+    const id = "yamato-oversized-without-safe-finish";
+    await startOversizedReply(f, id, yamatoOversizedPcmBytes);
+    if (expiry) {
+      f.advance(15001);
+      if (expiry === "watchdog") await f.b.checkDialogue();
+    }
+    await finishOversizedReply(f, id, text, { status, shape });
+    await f.b.systemActions;
+    if (expiry)
+      expect(f.b.responses.get(id).blockReason).toBe("generation_timeout");
+    expect(f.network.some((n) => n.url.endsWith("/speak"))).toBe(false);
+    expect(f.media.frames.some((m) => m.event === "media")).toBe(false);
+    expect(f.b.context.task_speech_attempts ?? 0).toBe(0);
+  },
+);
+
+it("blocks oversized appointment recovery that differs from the recipient's offer", async () => {
+  const f = await otaDialogueFixture();
+  f.b.context.appointment_offer = { month: 11, day: 14, hour: 16, minute: 0 };
+  const id = "oversized-mismatched-appointment";
+  await startOversizedReply(f, id, yamatoOversizedPcmBytes);
+  await finishOversizedReply(
+    f,
+    id,
+    yamatoCourtesy + "11月15日16時に予約を変更していただけますか。",
+  );
+  await f.b.systemActions;
+  expect(f.b.responses.get(id).blockReason).toBe("APPOINTMENT_OFFER_MISMATCH");
+  expect(f.network.some((n) => n.url.endsWith("/speak"))).toBe(false);
+  expect(f.media.frames.some((m) => m.event === "media")).toBe(false);
+});
+
+it("rejects an over-budget final transcript even when it follows a short question", async () => {
+  const f = await otaDialogueFixture();
+  const id = "over-budget-final-transcript";
+  await startOversizedReply(f, id, yamatoOversizedPcmBytes);
+  await f.b.onVoice({
+    type: "response.output_audio_transcript.delta",
+    response_id: id,
+    delta: yamatoQuestion,
+  });
+  await f.b.onVoice({
+    type: "response.done",
+    response: {
+      id,
+      status: "completed",
+      output: [
+        {
+          content: [
+            { type: "audio", transcript: "あ".repeat(3001) + yamatoQuestion },
+          ],
+        },
+      ],
+    },
+  });
+  await f.b.checkDialogue();
+  const response = f.b.responses.get(id);
+  expect(response.blockReason).toBe("transcript_length_limit");
+  expect(response.text.length).toBeLessThanOrEqual(3000);
+  expect(f.network.some((n) => n.url.endsWith("/speak"))).toBe(false);
+  expect(f.media.frames.some((m) => m.event === "media")).toBe(false);
+});
 
 it.each([
   { label: "a missing transcript", text: "", turn: null },

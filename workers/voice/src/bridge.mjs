@@ -33,6 +33,8 @@ import { dialPayload, taskFingerprint, statusForEnd } from "./contract.mjs";
 import { sha256, sameSecret, parseState } from "./security.mjs";
 const json = (body, status = 200) => Response.json(body, { status });
 const uuid = () => crypto.randomUUID();
+const MAX_TRANSCRIPT_CHARS = 3000;
+const MAX_GENERATION_MS = 15000;
 // Requests phrased as an imperative still require the recipient's answer.
 // Courtesy alone (e.g. よろしくお願いします) is not a task request.
 const expectsRecipientAnswer = (text) =>
@@ -1027,7 +1029,7 @@ export class VoiceBridge {
       response &&
       !response.suppressed &&
       !response.finalized &&
-      this.now() - response.createdAt < 15000 &&
+      this.now() - response.createdAt < MAX_GENERATION_MS &&
       !this.modelMustRemainSilent()
     );
   }
@@ -1081,7 +1083,7 @@ export class VoiceBridge {
       !response.rendered &&
       !response.suppressed &&
       !response.finalized &&
-      this.now() - response.createdAt < 15000 &&
+      this.now() - response.createdAt < MAX_GENERATION_MS &&
       !this.controller.assistantQuestionPending &&
       !pendingAnswer &&
       !this.modelMustRemainSilent()
@@ -1382,22 +1384,34 @@ export class VoiceBridge {
     speech.stop_unconfirmed = !result.ok;
     await this.persist();
   }
-  canRecoverTaskSpeech(text) {
-    const question = text.trim();
+  taskSpeechRecoveryAvailable() {
     return (
       this.env.EXTERNAL_STT === "true" &&
       !!this.context.answered_at &&
       !!this.context.call_id &&
       !!this.streamId &&
       !!this.context.dialogue_candidate_observed &&
-      (this.context.task_speech_attempts ?? 0) < 2 &&
-      question.length <= 72 &&
+      (this.context.task_speech_attempts ?? 0) < 2
+    );
+  }
+  taskSpeechRecoveryQuestion(text) {
+    if (!this.taskSpeechRecoveryAvailable()) return null;
+    // The whole transcript has already passed the ordinary spoken checks.
+    // Remove only a standalone courtesy; retain the only question verbatim.
+    const question = text
+      .trim()
+      .replace(
+        /^(?:お忙しいところ恐れ入ります|恐れ入ります|すみません)[。.．]\s*/,
+        "",
+      );
+    return question.length <= 72 &&
       /[\p{Script=Han}\p{Script=Hiragana}]/u.test(question) &&
       /^[^。.!！?？\n<>]+(?:でしょうか|ですか|ますか)[。?？]?$/.test(
         question,
       ) &&
       !isAudibilityCheck(question)
-    );
+      ? question
+      : null;
   }
   async playRecoveredTaskSpeech(id, text) {
     const request = this.context.latest_task_request;
@@ -1405,7 +1419,7 @@ export class VoiceBridge {
     if (
       request?.response_digest !== digest ||
       this.taskSpeechPending() ||
-      !this.canRecoverTaskSpeech(text)
+      !this.taskSpeechRecoveryAvailable()
     )
       return;
     const speech = {
@@ -1672,15 +1686,15 @@ export class VoiceBridge {
         !this.activity?.active &&
         !this.turnOpen &&
         !this.controller.speaking &&
-        (!response.recoverSpeech ||
+        (!response.recoveryQuestion ||
           (this.speechStartReady() &&
             !this.marks.pending.size &&
             this.controller.playback.remaining(this.now()) <= 0))
       ) {
-        this.completeBufferedResponse(id, response, !response.recoverSpeech);
-        if (response.recoverSpeech)
+        this.completeBufferedResponse(id, response, !response.recoveryQuestion);
+        if (response.recoveryQuestion)
           this.background(
-            this.playRecoveredTaskSpeech(id, response.text.trim()),
+            this.playRecoveredTaskSpeech(id, response.recoveryQuestion),
           );
       }
     }
@@ -1736,7 +1750,7 @@ export class VoiceBridge {
         active &&
         !active.completed &&
         !active.suppressed &&
-        this.now() - active.createdAt >= 15000
+        this.now() - active.createdAt >= MAX_GENERATION_MS
       )
         await this.rejectSpokenResponse(c.responseId, "generation_timeout");
       if (
@@ -2405,30 +2419,30 @@ export class VoiceBridge {
       )
     ) {
       if (this.controller.closing || this.controller.closed) return;
-      const bytes = Buffer.from(frame.delta, "base64");
       const response = this.responses.get(id);
       if (!response || response.completed || response.finalized) return;
+      if (typeof frame.delta !== "string")
+        throw Error("Invalid voice audio delta");
       response.firstAudioAt ??= this.now();
-      response.bytes += bytes.length;
+      // Estimate before decoding. For valid base64 this is the decoded size;
+      // malformed padding can only make the budget more conservative.
+      response.bytes += Buffer.byteLength(frame.delta, "base64");
       if (this.modelMustRemainSilent()) response.suppressed = true;
-      if (response.suppressed) return;
+      if (response.suppressed || response.overlongAudio) return;
       if (response.bytes > this.outputRate * 2 * this.speechLimit()) {
-        // Keep no overlong audio. Give a bounded, complete transcript a
-        // chance to recover through a separate synthesized playback.
+        // Never decode or retain PCM beyond the speech budget. Keep only
+        // the bounded transcript until normal response.done or timeout. An
+        // overlong PCM stream must not cut off an otherwise usable question.
         response.chunks = [];
         response.blockReason = "utterance_length_limit";
         response.overlongAudio = true;
-        if (
-          this.env.EXTERNAL_STT !== "true" ||
-          response.bytes > this.outputRate * 2 * 20 ||
-          (this.context.task_speech_attempts ?? 0) >= 2
-        )
+        if (!this.taskSpeechRecoveryAvailable())
           await this.rejectSpokenResponse(id, "utterance_length_limit");
         return;
       }
       // Audio and transcript deltas have no trusted word-level alignment.
       // Keep this short utterance private until its final transcript is checked.
-      response.chunks.push(bytes);
+      response.chunks.push(Buffer.from(frame.delta, "base64"));
     } else if (
       [
         "response.output_audio_transcript.delta",
@@ -2444,7 +2458,7 @@ export class VoiceBridge {
       ) {
         response.firstTextAt ??= this.now();
         const delta = frame.delta ?? "";
-        if (response.text.length + delta.length > 3000)
+        if (response.text.length + delta.length > MAX_TRANSCRIPT_CHARS)
           await this.rejectSpokenResponse(id, "transcript_length_limit");
         else response.text += delta;
       }
@@ -2492,7 +2506,8 @@ export class VoiceBridge {
               .map((c) => c.transcript),
           )
           .join("\n");
-        if (transcript) response.text = transcript;
+        const transcriptTooLong = transcript.length > MAX_TRANSCRIPT_CHARS;
+        if (transcript && !transcriptTooLong) response.text = transcript;
         // The controller has already provided this non-task-bearing first turn.
         // Do not repeat it or play a model greeting generated before pickup.
         if (
@@ -2509,6 +2524,7 @@ export class VoiceBridge {
         if (
           this.env.CONTROLLED_FAREWELL === "true" &&
           !response.suppressed &&
+          !transcriptTooLong &&
           this.controller.recipientClosing &&
           /失礼(?:いた)?します[。.!！\s]*$/.test(response.text)
         )
@@ -2517,7 +2533,9 @@ export class VoiceBridge {
           response.bytes && !response.suppressed
             ? frame.response?.status !== "completed"
               ? "incomplete_response"
-              : speechViolation(response.text, { final: true })
+              : transcriptTooLong
+                ? "transcript_length_limit"
+                : speechViolation(response.text, { final: true })
             : null;
         if (violation) await this.rejectSpokenResponse(id, violation);
         const appointmentBlock =
@@ -2533,15 +2551,20 @@ export class VoiceBridge {
           // recipient turn or send an unsupported system message.
         }
         if (response.overlongAudio && !response.suppressed) {
-          response.recoverSpeech =
-            (!!transcript || response.audioCompleted) &&
-            this.canRecoverTaskSpeech(response.text);
-          if (!response.recoverSpeech)
-            await this.rejectSpokenResponse(id, "utterance_length_limit");
+          if (response.completedAt - response.createdAt >= MAX_GENERATION_MS) {
+            await this.rejectSpokenResponse(id, "generation_timeout");
+          } else {
+            response.recoveryQuestion =
+              transcript || response.audioCompleted
+                ? this.taskSpeechRecoveryQuestion(response.text)
+                : null;
+            if (!response.recoveryQuestion)
+              await this.rejectSpokenResponse(id, "utterance_length_limit");
+          }
         }
         if (
           !response.suppressed &&
-          (response.chunks.length || response.recoverSpeech)
+          (response.chunks.length || response.recoveryQuestion)
         ) {
           response.validated = true;
           // The transcript is final and immutable. Wait briefly for real quiet;
@@ -2578,7 +2601,8 @@ export class VoiceBridge {
             ].includes(args?.outcome) &&
             (args.outcome === "confirmed" ||
               this.context.latest_task_request ||
-              this.responses.get(this.controller.responseId)?.recoverSpeech) &&
+              this.responses.get(this.controller.responseId)
+                ?.recoveryQuestion) &&
             !this.controller.recipientTerminal &&
             !this.controller.holdExpired &&
             !this.context.latest_task_request?.recipient_answer_at

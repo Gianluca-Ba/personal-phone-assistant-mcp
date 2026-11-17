@@ -5,6 +5,7 @@ import {
   isHoldRequest,
   isHoldFiller,
   isHoldReturn,
+  normalizeJapaneseTurn,
 } from "../../../scripts/jp-backchannel.mjs";
 export const menuText = (text) =>
   normalizeMenuTranscript(text)
@@ -18,6 +19,11 @@ const ivr =
 const directPickup = (s) =>
   /^(?:はい[、,\s]*)?(?:お電話(?:を)?ありがとうございます|おやっとうございます)[、,\s]+[^。！？「」『』“”"]{1,30}(?:です|でございます)[。.!！\s]*$/.test(
     s.trim(),
+  ) ||
+  // Nova transcribed the Yamato pickup as 大和音. Match the complete
+  // affirmative introduction, including the ASR variant.
+  /^はい[、,。\s]*(?:ヤマト運輸|大和音)(?:です|でございます)[。.!！\s]*$/.test(
+    normalizeJapaneseTurn(s),
   );
 export function progressEvidence(baseline, transcript, seen = []) {
   const text = menuText(transcript),
