@@ -62,6 +62,33 @@ it.each([
 ])("keeps non-dialogue Yamato turns gated: %s", (text) => {
   expect(progressEvidence("", text)?.kind).not.toBe("human_greeting_candidate");
 });
+it.each([
+  "はい、アピットオートバックス東雲です。",
+  "はい、オートバックス東雲店でございます。",
+  "はい、A PIT AUTOBACS SHINONOMEです。",
+  "はい、Ａ ＰＩＴ ＡＵＴＯＢＡＣＳ ＳＨＩＮＯＮＯＭＥです。",
+  "ハピートオトバックス調整点です。",
+])("opens dialogue on the short AUTOBACS pickup: %s", (text) => {
+  expect(progressEvidence("", text)).toMatchObject({
+    kind: "human_greeting_candidate",
+  });
+});
+it.each([
+  "",
+  "。",
+  "はい。",
+  "アピットオートバックス東雲にお電話いただきありがとうございます。",
+  "こちらはアピットオートバックス東雲の録音案内です。",
+  "はい、アピットオートバックス東雲です。その他は五番を押してください。",
+  "はい、アピットオートバックス東雲です。少々お待ちください。",
+  "担当者におつなぎいたします。はい、アピットオートバックス東雲です。",
+  "「はい、アピットオートバックス東雲です。」と録音されています。",
+  "ハピートオトバックス調整点です。自動音声案内をお聞きください。",
+  "はい、アピットオートバックス東雲ではありません。",
+  "はい、アピットオートバックス別店舗です。",
+])("keeps non-dialogue AUTOBACS turns gated: %s", (text) => {
+  expect(progressEvidence("", text)?.kind).not.toBe("human_greeting_candidate");
+});
 it("does not release a routing hold for an announcement that asks the caller to keep waiting", () => {
   for (const text of [
     "お待たせしました。少々お待ちください。",

@@ -1174,10 +1174,15 @@ export class VoiceBridge {
         s.raw_five_finals++;
     }
   }
-  modelMustRemainSilent({ allowTaskSpeech = false } = {}) {
+  modelMustRemainSilent({
+    allowTaskSpeech = false,
+    allowDialogueGate = false,
+    allowAttention = false,
+  } = {}) {
     return !!(
       (!allowTaskSpeech && this.taskSpeechPending()) ||
-      (this.context.dialogue_gate_required === true &&
+      (!allowDialogueGate &&
+        this.context.dialogue_gate_required === true &&
         !this.context.dialogue_candidate_observed) ||
       this.context.task_speech?.stop_unconfirmed ||
       this.controller?.hold ||
@@ -1190,7 +1195,8 @@ export class VoiceBridge {
       this.context.controlled_close_requested ||
       (this.context.controlled_closing &&
         !this.context.controlled_closing.cancelled) ||
-      (this.context.attention &&
+      (!allowAttention &&
+        this.context.attention &&
         !this.context.attention.cancelled &&
         !this.context.attention.completed) ||
       this.controller?.menu?.isIvr ||
@@ -1300,8 +1306,64 @@ export class VoiceBridge {
         "Silent transport feedback: the task is not confirmed. Generated assistant text is not evidence of played audio. No substantive recipient answer in a new turn after the latest request's playback was observed. Do not infer acceptance from silence, a greeting, an earlier answer, or an unplayed question. Listen; when the recipient is quiet, clarify or repeat one short authorized request if needed. If appointment_rejection includes an offered_slot, the mismatched request was not played; use only that exact offered month, day and time if authorized, or ask for clarification. Never read this feedback aloud. The server's bounded silence/hold cleanup remains active.",
     };
   }
-  async playAttention() {
-    if (this.context.attention || this.ended || this.modelMustRemainSilent())
+  observeUnrecognizedPickup() {
+    if (
+      this.env.EXTERNAL_STT !== "true" ||
+      !this.context.answered_at ||
+      !this.streamId ||
+      this.context.dialogue_candidate_observed ||
+      this.context.pickup_clarification ||
+      this.context.attention ||
+      !this.recipientAudioEpoch ||
+      this.turnAudioEpoch !== this.recipientAudioEpoch ||
+      this.activity?.lastVoice == null ||
+      this.modelMustRemainSilent({ allowDialogueGate: true })
+    )
+      return;
+    this.context.pickup_clarification = {
+      eligible_at: this.now() + 1000,
+      audio_epoch: this.recipientAudioEpoch,
+      after_turn: this.recipientTurnSequence,
+    };
+  }
+  pickupClarificationReady() {
+    const pickup = this.context.pickup_clarification;
+    return !!(
+      pickup &&
+      !this.ended &&
+      !this.failing &&
+      !this.controller.closed &&
+      !this.controller.closing &&
+      !this.context.dialogue_candidate_observed &&
+      this.context.answered_at &&
+      this.context.call_id &&
+      this.streamId &&
+      this.env.EXTERNAL_STT === "true" &&
+      this.now() >= pickup.eligible_at &&
+      this.recipientAudioEpoch === pickup.audio_epoch &&
+      this.recipientTurnSequence === pickup.after_turn &&
+      !/自動音声|音声案内|ガイダンス|録音|保留音|音楽|営業(?:時間|は|を)|にお電話(?:いただき|頂き)|\[(?:music|on hold)|press|押してください|選択してください|入力してください/i.test(
+        this.controller.inputText ?? "",
+      ) &&
+      this.lastMediaAt !== undefined &&
+      this.now() - this.lastMediaAt < 1000 &&
+      !this.initialAckPending() &&
+      !this.controller.responseActive &&
+      !this.marks.pending.size &&
+      this.controller.playback.remaining(this.now()) <= 0 &&
+      this.speechStartReady() &&
+      !this.modelMustRemainSilent({
+        allowDialogueGate: true,
+        allowAttention: true,
+      })
+    );
+  }
+  async playAttention({ pickup = false } = {}) {
+    if (
+      this.context.attention ||
+      this.ended ||
+      (pickup ? !this.pickupClarificationReady() : this.modelMustRemainSilent())
+    )
       return;
     const state = Buffer.from(
       JSON.stringify({
@@ -1311,14 +1373,25 @@ export class VoiceBridge {
         token: uuid(),
       }),
     ).toString("base64");
-    const attention = { state, cancelled: false, completed: false };
+    const attention = {
+      state,
+      cancelled: false,
+      completed: false,
+      dispatched: false,
+    };
     this.context.attention = attention;
+    if (pickup) {
+      this.silence.checkedOnce = true;
+      this.silence.checkStarted = true;
+    }
     await this.persist();
     if (this.ended || attention.cancelled || attention.completed) return;
     const result = await this.systemVoiceAction(
       "speak",
       {
-        payload: "もしもし、聞こえていらっしゃいますか。",
+        payload: pickup
+          ? "もしもし、もう一度お願いできますか。"
+          : "もしもし、聞こえていらっしゃいますか。",
         payload_type: "text",
         voice: "female",
         language: "ja-JP",
@@ -1326,8 +1399,25 @@ export class VoiceBridge {
       },
       "silence-attention-once",
       () => !this.ended && !attention.cancelled && !attention.completed,
+      () => {
+        if (
+          this.ended ||
+          attention.cancelled ||
+          attention.completed ||
+          (pickup && !this.pickupClarificationReady())
+        )
+          return false;
+        attention.dispatched = true;
+        return true;
+      },
     );
     if (attention.cancelled || attention.completed || this.ended) return;
+    if (result.skipped || result.reason === "DISPATCH_DEFERRED") {
+      attention.cancelled = true;
+      this.silence.cancelCheck();
+      await this.persist();
+      return;
+    }
     if (!result.ok) {
       this.context.attention.cancelled = true;
       this.requestControlledStop("silence_attention_unconfirmed");
@@ -1351,11 +1441,14 @@ export class VoiceBridge {
     attention.cancelled = true;
     clearTimeout(this.attentionDeadline);
     this.silence.cancelCheck();
-    const stop = this.systemVoiceAction(
-      "playback_stop",
-      { stop: "all" },
-      "cancel-attention",
-    );
+    const stop =
+      attention.dispatched !== false
+        ? this.systemVoiceAction(
+            "playback_stop",
+            { stop: "all" },
+            "cancel-attention",
+          )
+        : Promise.resolve();
     await this.persist();
     await stop;
   }
@@ -1729,6 +1822,8 @@ export class VoiceBridge {
         });
       }
       await this.playInitialAck();
+      if (!this.context.attention && this.pickupClarificationReady())
+        await this.playAttention({ pickup: true });
       if (
         this.taskSpeechPending() &&
         (this.modelMustRemainSilent({ allowTaskSpeech: true }) ||
@@ -1811,7 +1906,12 @@ export class VoiceBridge {
         this.context.ivr_progress?.state !== "awaiting_transition"
       )
         this.requestControlledStop("ivr_no_selection_timeout");
-      if (action === "check") await this.playAttention();
+      if (action === "check") {
+        await this.playAttention();
+        // If speech is still gated, retain bounded silent cleanup instead
+        // of leaving the watchdog waiting for a callback that cannot arrive.
+        if (!this.context.attention) this.silence.cancelCheck();
+      }
       if (action === "close")
         this.requestControlledStop("recipient_silence_timeout");
       c.recipientAudioActive = !!this.activity?.active;
@@ -1891,6 +1991,15 @@ export class VoiceBridge {
     if (this.ended || this.failing) return;
     this.recipientInterim = null;
     this.controller.routingHoldAudioOnly = false;
+    if (!/[\p{L}\p{N}]/u.test(text)) {
+      this.controller.event({
+        type: "recipient_turn_untranscribed",
+        interrupted: !!this.cancelledForTurn,
+      });
+      this.turnOpen = false;
+      this.observeUnrecognizedPickup();
+      return;
+    }
     if (this.context.stt_observations && /[五5].{0,6}押してください/.test(text))
       this.context.stt_observations.delivered_five++;
     const wasHeld = !!(this.controller.hold || this.controller.holdExpired);
@@ -2211,6 +2320,7 @@ export class VoiceBridge {
               type: "recipient_turn_untranscribed",
               interrupted: !!this.cancelledForTurn,
             });
+            this.observeUnrecognizedPickup();
           }
         },
       });

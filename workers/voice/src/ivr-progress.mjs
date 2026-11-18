@@ -24,6 +24,11 @@ const directPickup = (s) =>
   // affirmative introduction, including the ASR variant.
   /^はい[、,。\s]*(?:ヤマト運輸|大和音)(?:です|でございます)[。.!！\s]*$/.test(
     normalizeJapaneseTurn(s),
+  ) ||
+  // Whole direct introductions only. The observed ASR alias is a dialogue
+  // cue, never evidence of the speaker's identity or a successful task.
+  /^(?:はい[、,。\s]*)?(?:(?:アピット[・\s]*)?オートバックス[・\s]*東雲(?:店)?|A\s*PIT\s*AUTOBACS\s*SHINONOME|ハピートオトバックス調整点)(?:です|でございます)[。.!！\s]*$/i.test(
+    normalizeJapaneseTurn(s),
   );
 export function progressEvidence(baseline, transcript, seen = []) {
   const text = menuText(transcript),
